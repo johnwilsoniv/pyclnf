@@ -5,20 +5,20 @@ This is the main user-facing API that combines:
 - PDM (Point Distribution Model) for shape representation
 - CCNF patch experts for landmark detection
 - NU-RLMS optimizer for parameter fitting
-- Corrected RetinaFace detector (ARM Mac optimized, primary detector)
+- PyMTCNN face detector (pure Python, cross-platform)
 
 Usage (PRIMARY - with automatic face detection):
     from pyclnf import CLNF
     import cv2
 
-    # Initialize model with corrected RetinaFace detector (default)
-    clnf = CLNF()  # ARM Mac optimized, 8.23px accuracy
+    # Initialize model with PyMTCNN face detector (default)
+    clnf = CLNF()  # Pure Python, cross-platform
 
     # Detect and fit landmarks automatically
     image = cv2.imread("face.jpg")
     landmarks, info = clnf.detect_and_fit(image)
 
-Usage (LEGACY - with manual bbox):
+Usage (ALTERNATIVE - with manual bbox):
     from pyclnf import CLNF
 
     # Initialize model without detector
@@ -36,7 +36,6 @@ from pathlib import Path
 from .core.pdm import PDM
 from .core.patch_expert import CCNFModel
 from .core.optimizer import NURLMSOptimizer
-from .utils.retinaface_correction import RetinaFaceCorrectedDetector
 
 
 class CLNF:
@@ -56,9 +55,7 @@ class CLNF:
                  sigma: float = 1.5,
                  weight_multiplier: float = 0.0,
                  window_sizes: list = None,
-                 detector: str = "retinaface",
-                 detector_model_path: Optional[str] = None,
-                 use_coreml: bool = False):
+                 detector: bool = True):
         """
         Initialize CLNF model.
 
@@ -77,9 +74,7 @@ class CLNF:
                              (OpenFace uses w=7 for Multi-PIE, w=5 for in-the-wild)
             window_sizes: List of window sizes for hierarchical refinement (default: [11, 9, 7])
                          Note: Only window sizes with sigma components are supported ([7, 9, 11, 15])
-            detector: Face detector to use ("retinaface" or None). Default: "retinaface"
-            detector_model_path: Path to detector model. If None, uses default path
-            use_coreml: Enable CoreML acceleration for RetinaFace (ARM Mac optimization)
+            detector: Enable PyMTCNN face detector (default: True). Set to False to use manual bbox.
         """
         self.model_dir = Path(model_dir)
         self.regularization = regularization
@@ -111,21 +106,15 @@ class CLNF:
             weight_multiplier=weight_multiplier  # CRITICAL: Apply weight multiplier
         )
 
-        # Initialize face detector (PRIMARY: Corrected RetinaFace for ARM Mac optimization)
+        # Initialize PyMTCNN face detector
         self.detector = None
-        if detector == "retinaface":
-            # Default model path if not specified
-            if detector_model_path is None:
-                detector_model_path = "S1 Face Mirror/weights/retinaface_mobilenet025_coreml.onnx"
-
-            # Initialize corrected RetinaFace detector
+        if detector:
             try:
-                self.detector = RetinaFaceCorrectedDetector(
-                    model_path=detector_model_path,
-                    use_coreml=use_coreml
-                )
+                from pymtcnn import PyMTCNN
+                self.detector = PyMTCNN()
             except Exception as e:
-                print(f"Warning: Could not initialize RetinaFace detector: {e}")
+                print(f"Warning: Could not initialize PyMTCNN detector: {e}")
+                print("Install pymtcnn with: pip install pymtcnn")
                 print("Detector will not be available. Use fit() with manual bbox instead.")
 
     def fit(self,
@@ -262,13 +251,12 @@ class CLNF:
                        return_all_faces: bool = False,
                        return_params: bool = False) -> Tuple[np.ndarray, Dict]:
         """
-        Detect faces and fit CLNF landmarks in one call using the built-in detector.
+        Detect faces and fit CLNF landmarks in one call using PyMTCNN.
 
         This is the primary method for using pyCLNF with automatic face detection.
-        Uses corrected RetinaFace as the default detector (ARM Mac optimized).
 
         Args:
-            image: Input image (grayscale or color, will be converted to grayscale)
+            image: Input image (BGR color format for PyMTCNN)
             return_all_faces: If True, return results for all detected faces
                             If False, return only the first (largest) face
             return_params: If True, include optimized parameters in info dict
@@ -285,7 +273,8 @@ class CLNF:
 
         Example:
             >>> from pyclnf import CLNF
-            >>> clnf = CLNF()  # Initializes with corrected RetinaFace
+            >>> import cv2
+            >>> clnf = CLNF()  # Initializes with PyMTCNN
             >>> image = cv2.imread("face.jpg")
             >>> landmarks, info = clnf.detect_and_fit(image)
             >>> print(f"Detected {len(landmarks)} landmarks")
@@ -293,22 +282,32 @@ class CLNF:
         if self.detector is None:
             raise ValueError(
                 "No detector initialized. Either:\n"
-                "1. Initialize CLNF with detector='retinaface' (default)\n"
-                "2. Use fit() method with manual bbox instead"
+                "1. Initialize CLNF with detector=True (default)\n"
+                "2. Install pymtcnn: pip install pymtcnn\n"
+                "3. Use fit() method with manual bbox instead"
             )
 
-        # Convert to color for detector (detector needs BGR)
+        # PyMTCNN expects BGR color image
         if len(image.shape) == 2:
             # Grayscale -> BGR for detector
             image_bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         else:
             image_bgr = image
 
-        # Detect faces with corrected RetinaFace
-        bboxes = self.detector.detect_and_correct(image_bgr)
+        # Detect faces with PyMTCNN
+        bboxes_mtcnn, _ = self.detector.detect(image_bgr, return_landmarks=False)
 
-        if len(bboxes) == 0:
+        if len(bboxes_mtcnn) == 0:
             raise ValueError("No faces detected in image")
+
+        # Convert PyMTCNN bboxes from (x1, y1, x2, y2) to (x, y, width, height)
+        bboxes = []
+        for bbox_mtcnn in bboxes_mtcnn:
+            x1, y1, x2, y2 = bbox_mtcnn
+            x, y = x1, y1
+            width = x2 - x1
+            height = y2 - y1
+            bboxes.append((x, y, width, height))
 
         # Process all faces if requested
         if return_all_faces:
