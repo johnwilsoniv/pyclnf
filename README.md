@@ -4,7 +4,7 @@
 
 [![PyPI version](https://badge.fury.io/py/pyclnf.svg)](https://badge.fury.io/py/pyclnf)
 [![Python](https://img.shields.io/pypi/pyversions/pyclnf.svg)](https://pypi.org/project/pyclnf/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: CC BY-NC 4.0](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc/4.0/)
 
 A pure Python implementation of OpenFace's CLNF facial landmark detector. Uses exported OpenFace trained models with no C++ dependencies, making it perfect for cross-platform deployment and PyInstaller distribution.
 
