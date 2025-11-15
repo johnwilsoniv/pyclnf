@@ -23,20 +23,12 @@ Components:
 
 from .clnf import CLNF
 from .core import PDM, CCNFModel, CCNFPatchExpert, NURLMSOptimizer
-from .utils.retinaface_correction import (
-    apply_retinaface_correction,
-    RetinaFaceCorrectedDetector,
-    get_correction_info
-)
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     'CLNF',
     'PDM',
     'CCNFModel',
     'CCNFPatchExpert',
     'NURLMSOptimizer',
-    'apply_retinaface_correction',
-    'RetinaFaceCorrectedDetector',
-    'get_correction_info'
 ]

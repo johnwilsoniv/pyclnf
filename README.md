@@ -6,17 +6,18 @@
 [![Python](https://img.shields.io/pypi/pyversions/pyclnf.svg)](https://pypi.org/project/pyclnf/)
 [![License: CC BY-NC 4.0](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc/4.0/)
 
-A pure Python implementation of OpenFace's CLNF facial landmark detector. Uses exported OpenFace trained models with no C++ dependencies, making it perfect for cross-platform deployment and PyInstaller distribution.
+A pure Python implementation of OpenFace's CLNF facial landmark detector with built-in PyMTCNN face detection. Uses exported OpenFace trained models with no C++ dependencies, making it perfect for cross-platform deployment and PyInstaller distribution.
 
 ## Features
 
 - **100% Pure Python**: No C++ compilation required
+- **Built-in Face Detection**: Integrated PyMTCNN for automatic face detection
 - **OpenFace Compatible**: Uses original OpenFace trained models (CCNF patch experts)
 - **Cross-Platform**: Works on Windows, macOS, Linux
 - **68-Point Landmarks**: Full facial landmark detection
 - **8.23px Accuracy**: Validated against C++ OpenFace
 - **No GPU Required**: CPU-based inference
-- **Easy Integration**: Simple API, works with any face detector
+- **Simple API**: One-line face detection and landmark fitting
 
 ## Installation
 
@@ -24,49 +25,36 @@ A pure Python implementation of OpenFace's CLNF facial landmark detector. Uses e
 pip install pyclnf
 ```
 
+This automatically installs PyMTCNN as a dependency for face detection.
+
 ## Quick Start
+
+### Automatic Face Detection (Recommended)
 
 ```python
 from pyclnf import CLNF
 import cv2
 
-# Initialize detector
+# Initialize with built-in PyMTCNN detector
 clnf = CLNF()
 
 # Load image
 image = cv2.imread("face.jpg")
 
-# Detect landmarks (requires face bounding box)
-face_bbox = (100, 100, 200, 250)  # [x, y, width, height]
-landmarks, info = clnf.fit(image, face_bbox)
+# Detect face and fit landmarks in one call
+landmarks, info = clnf.detect_and_fit(image)
 
 # landmarks: (68, 2) array of (x, y) coordinates
-# info: {'converged': bool, 'iterations': int, ...}
+# info: {'converged': bool, 'iterations': int, 'bbox': tuple, ...}
 
 print(f"Detected {len(landmarks)} landmarks")
+print(f"Face bbox: {info['bbox']}")
 print(f"Converged: {info['converged']} in {info['iterations']} iterations")
 ```
 
-## With Automatic Face Detection
+### Manual Bounding Box (Alternative)
 
-PyCLNF includes optional RetinaFace integration for automatic face detection:
-
-```python
-from pyclnf import CLNF
-
-# Initialize with built-in face detector
-clnf = CLNF(detector="retinaface", use_coreml=True)  # CoreML for ARM Mac speedup
-
-# Detect face and landmarks in one call
-landmarks, info = clnf.detect_and_fit(image)
-
-print(f"Face bbox: {info['bbox']}")
-print(f"Landmarks: {landmarks.shape}")
-```
-
-## Integration with PyMTCNN
-
-For best results with facial paralysis research, use with [PyMTCNN](https://github.com/johnwilsoniv/pymtcnn):
+If you have your own face detector or pre-computed bounding boxes:
 
 ```python
 from pymtcnn import PyMTCNN
@@ -75,14 +63,16 @@ import cv2
 
 # Initialize detectors
 mtcnn = PyMTCNN()
-clnf = CLNF(detector=None)  # No built-in detector
+clnf = CLNF(detector=False)  # Disable built-in detector
 
 # Detect face with MTCNN
 image = cv2.imread("face.jpg")
 bboxes, landmarks_5 = mtcnn.detect(image, return_landmarks=True)
 
 if len(bboxes) > 0:
-    bbox = bboxes[0]  # Use first face
+    # Convert PyMTCNN bbox from (x1, y1, x2, y2) to (x, y, width, height)
+    x1, y1, x2, y2 = bboxes[0]
+    bbox = (x1, y1, x2 - x1, y2 - y1)
 
     # Refine with CLNF
     landmarks_68, info = clnf.fit(image, bbox)
@@ -95,7 +85,7 @@ if len(bboxes) > 0:
 ```
 Input Image
     ↓
-Face Detection (MTCNN / RetinaFace / Manual)
+Face Detection (PyMTCNN)
     ↓
 Face Bounding Box
     ↓
@@ -154,17 +144,18 @@ Non-Uniform Regularized Landmark Mean-Shift optimization.
 
 ## API Reference
 
-### `CLNF(model_dir, detector, use_coreml, ...)`
+### `CLNF(model_dir, detector, ...)`
 
 Initialize CLNF landmark detector.
 
 **Parameters:**
 - `model_dir` (str): Path to model directory (default: "pyclnf/models")
-- `detector` (str): Face detector ("retinaface" or None)
-- `use_coreml` (bool): Enable CoreML acceleration for RetinaFace
+- `detector` (bool): Enable PyMTCNN face detector (default: True)
 - `regularization` (float): Shape constraint weight (default: 25.0)
 - `max_iterations` (int): Max optimization iterations (default: 10)
 - `convergence_threshold` (float): Convergence threshold (default: 0.005)
+- `window_sizes` (list): Hierarchical window sizes (default: [19, 17, 15])
+- `sigma` (float): Patch expert kernel sigma (default: 1.5)
 
 ### `fit(image, face_bbox, initial_params, return_params)`
 
@@ -217,9 +208,7 @@ pyclnf/models/
 - Python >= 3.8
 - NumPy >= 1.19.0
 - OpenCV >= 4.5.0
-
-Optional:
-- PyMTCNN (for face detection)
+- PyMTCNN >= 1.0.0 (for face detection)
 
 ## Wheel Distribution
 
