@@ -1,0 +1,13 @@
+include README.md
+include LICENSE
+include pyproject.toml
+
+# Include all model files
+recursive-include pyclnf/models *.npz
+recursive-include pyclnf/models *.npy
+
+# Exclude development files
+global-exclude *.pyc
+global-exclude __pycache__
+global-exclude .DS_Store
+global-exclude *.py[cod]
