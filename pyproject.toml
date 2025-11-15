@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Pure Python implementation of CLNF (Constrained Local Neural Fields) facial landmark detector"
 readme = "README.md"
 requires-python = ">=3.8"
-license = {text = "MIT"}
+license = {text = "CC BY-NC 4.0"}
 authors = [
     {name = "John Wilson IV", email = "your.email@example.com"},
 ]
@@ -24,7 +24,7 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
+    "License :: Other/Proprietary License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
