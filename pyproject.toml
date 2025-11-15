@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyclnf"
-version = "0.1.0"
+version = "0.2.0"
 description = "Pure Python implementation of CLNF (Constrained Local Neural Fields) facial landmark detector"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -19,6 +19,7 @@ keywords = [
     "openface",
     "computer-vision",
     "pure-python",
+    "mtcnn",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -37,6 +38,7 @@ classifiers = [
 dependencies = [
     "numpy>=1.19.0",
     "opencv-python>=4.5.0",
+    "pymtcnn>=1.0.0",
 ]
 
 [project.optional-dependencies]
