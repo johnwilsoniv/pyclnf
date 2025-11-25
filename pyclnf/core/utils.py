@@ -38,6 +38,9 @@ def align_shapes_with_scale(src_shape: np.ndarray, dst_shape: np.ndarray) -> np.
     dst_centered = dst_shape - dst_mean
 
     # Compute scales (for normalization)
+    # Note: C++ uses RMS (divide by n) but uses SVD-based Kabsch for rotation.
+    # Python uses simplified dot-product rotation that requires total-variance normalization.
+    # These are mathematically equivalent but use different conventions.
     src_scale = np.sqrt((src_centered ** 2).sum())
     dst_scale = np.sqrt((dst_centered ** 2).sum())
 
