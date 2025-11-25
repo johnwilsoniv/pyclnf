@@ -197,8 +197,8 @@ class PDM:
         r32 = R[2, 1]
         r33 = R[2, 2]
 
-        # Initialize Jacobian
-        J = np.zeros((2 * self.n_points, self.n_params))
+        # Initialize Jacobian with explicit float64 for numerical precision
+        J = np.zeros((2 * self.n_points, self.n_params), dtype=np.float64)
 
         # ==================================================================
         # RIGID PARAMETER DERIVATIVES (OpenFace PDM.cpp lines 396-412)
@@ -260,6 +260,25 @@ class PDM:
 
         return J
 
+    def compute_jacobian_rigid(self, params: np.ndarray) -> np.ndarray:
+        """
+        Compute Jacobian matrix for ONLY rigid (global) parameters.
+
+        This is used in the RIGID phase of two-phase optimization where we only
+        update scale, rotation, and translation while keeping shape params at 0.
+
+        Args:
+            params: Parameter vector [s, wx, wy, wz, tx, ty, q0, ..., qm]
+
+        Returns:
+            jacobian: Jacobian matrix, shape (2*n_points, 6) for rigid params only
+        """
+        # Compute full Jacobian
+        J_full = self.compute_jacobian(params)
+
+        # Return only rigid parameter columns (0-5: scale, wx, wy, wz, tx, ty)
+        return J_full[:, :6]
+
     def _euler_to_rotation_matrix(self, euler: np.ndarray) -> np.ndarray:
         """
         Convert Euler angles to rotation matrix.
@@ -286,6 +305,7 @@ class PDM:
         c3 = np.cos(euler[2])  # cos(roll)
 
         # Rotation matrix from XYZ Euler angles (OpenFace convention)
+        # Use float32 to match C++ OpenFace (cv::Mat_<float>)
         R = np.array([
             [c2 * c3,              -c2 * s3,             s2],
             [c1 * s3 + c3 * s1 * s2,  c1 * c3 - s1 * s2 * s3,  -c2 * s1],
@@ -353,6 +373,28 @@ class PDM:
             [-v[1],  v[0],  0]
         ])
 
+    def _apply_mtcnn_bbox_preprocessing(self, bbox: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
+        """
+        Apply MTCNN-style bbox preprocessing to match C++ OpenFace initialization.
+
+        NOTE: C++ OpenFace runs MTCNN detection even when a manual bbox is provided.
+        The MTCNN detector outputs a bbox with:
+        1. Square aspect ratio (rectify)
+        2. Landmark-tightening corrections from ONet regression
+
+        For Python to match C++ initialization, we need to apply equivalent preprocessing.
+
+        Args:
+            bbox: Raw bbox [x, y, width, height] from detector
+
+        Returns:
+            bbox: Preprocessed [x, y, width, height]
+        """
+        # For now, return bbox as-is since applying MTCNN corrections
+        # without full MTCNN detection doesn't match C++ behavior
+        # TODO: Either run MTCNN in Python, or accept the small initialization difference
+        return bbox
+
     def init_params(self, bbox: Optional[Tuple[float, float, float, float]] = None) -> np.ndarray:
         """
         Initialize parameter vector from face bounding box or to neutral pose.
@@ -369,6 +411,8 @@ class PDM:
         params = np.zeros(self.n_params)
 
         if bbox is not None:
+            # Apply MTCNN-style preprocessing if needed (currently a no-op)
+            bbox = self._apply_mtcnn_bbox_preprocessing(bbox)
             x, y, width, height = bbox
 
             # OpenFace-style initialization (aspect-ratio aware)
@@ -552,6 +596,13 @@ class PDM:
         # 4. Compose rotations: R3 = R1 * R2 (OpenFace line 480)
         R3 = R1 @ R2
 
+        # 4b. Orthonormalize final composed rotation (OpenFace PDM.cpp lines 487-494)
+        # This is CRITICAL for late-stage convergence - without it, accumulated
+        # numerical errors in R1 (from repeated euler->matrix->euler conversions)
+        # cause the rotation to drift off the SO(3) manifold, leading to
+        # ill-conditioned Hessians and poor convergence.
+        R3 = self._orthonormalize(R3)
+
         # 5. Convert back to Euler angles via axis-angle (OpenFace lines 482-485)
         #    This ensures the result is a valid rotation
         axis_angle = self._rotation_matrix_to_axis_angle(R3)
@@ -582,10 +633,17 @@ class PDM:
             R: 3x3 matrix (approximately a rotation matrix)
 
         Returns:
-            R_ortho: Orthonormalized 3x3 rotation matrix
+            R_ortho: Orthonormalized 3x3 rotation matrix with det = +1
         """
         U, S, Vt = np.linalg.svd(R)
-        return U @ Vt
+        R_ortho = U @ Vt
+
+        # Ensure proper rotation (det = +1, not -1 which would be a reflection)
+        if np.linalg.det(R_ortho) < 0:
+            U[:, -1] *= -1
+            R_ortho = U @ Vt
+
+        return R_ortho
 
     def _rotation_matrix_to_axis_angle(self, R: np.ndarray) -> np.ndarray:
         """
@@ -647,11 +705,27 @@ class PDM:
 
         R = np.eye(3, dtype=np.float32) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K)
 
-        # Extract Euler angles from rotation matrix (XYZ convention)
-        # R = Rx(pitch) * Ry(yaw) * Rz(roll)
-        pitch = np.arctan2(-R[2, 1], R[2, 2])
-        yaw = np.arcsin(np.clip(R[2, 0], -1.0, 1.0))
-        roll = np.arctan2(-R[1, 0], R[0, 0])
+        # Extract Euler angles from rotation matrix using quaternion intermediate
+        # This matches OpenFace's RotationMatrix2Euler (RotationHelpers.h lines 73-89)
+
+        # Convert rotation matrix to quaternion
+        q0 = np.sqrt(1 + R[0, 0] + R[1, 1] + R[2, 2]) / 2.0
+
+        # Handle numerical stability
+        if q0 < 1e-10:
+            q0 = 1e-10
+
+        q1 = (R[2, 1] - R[1, 2]) / (4.0 * q0)
+        q2 = (R[0, 2] - R[2, 0]) / (4.0 * q0)
+        q3 = (R[1, 0] - R[0, 1]) / (4.0 * q0)
+
+        # Convert quaternion to Euler angles (XYZ convention)
+        t1 = 2.0 * (q0 * q2 + q1 * q3)
+        t1 = np.clip(t1, -1.0, 1.0)
+
+        yaw = np.arcsin(t1)
+        pitch = np.arctan2(2.0 * (q0 * q1 - q2 * q3), q0*q0 - q1*q1 - q2*q2 + q3*q3)
+        roll = np.arctan2(2.0 * (q0 * q3 - q1 * q2), q0*q0 + q1*q1 - q2*q2 - q3*q3)
 
         return np.array([pitch, yaw, roll], dtype=np.float32)
 

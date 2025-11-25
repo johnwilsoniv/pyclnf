@@ -92,3 +92,12 @@ celerybeat.pid
 
 # Documentation
 docs/_build/
+
+# Large model files - download separately
+pyclnf/models/exported_eye_ccnf_left/
+pyclnf/models/exported_eye_ccnf_right/
+pyclnf/models/exported_eye_pdm_left/
+pyclnf/models/exported_eye_pdm_right/
+pyclnf/models/patch_experts/*.dat
+*.npz
+*.npy
