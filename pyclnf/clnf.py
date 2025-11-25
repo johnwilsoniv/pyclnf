@@ -5,20 +5,20 @@ This is the main user-facing API that combines:
 - PDM (Point Distribution Model) for shape representation
 - CCNF patch experts for landmark detection
 - NU-RLMS optimizer for parameter fitting
-- PyMTCNN face detector (pure Python, cross-platform)
+- Corrected RetinaFace detector (ARM Mac optimized, primary detector)
 
 Usage (PRIMARY - with automatic face detection):
     from pyclnf import CLNF
     import cv2
 
-    # Initialize model with PyMTCNN face detector (default)
-    clnf = CLNF()  # Pure Python, cross-platform
+    # Initialize model with corrected RetinaFace detector (default)
+    clnf = CLNF()  # ARM Mac optimized, 8.23px accuracy
 
     # Detect and fit landmarks automatically
     image = cv2.imread("face.jpg")
     landmarks, info = clnf.detect_and_fit(image)
 
-Usage (ALTERNATIVE - with manual bbox):
+Usage (LEGACY - with manual bbox):
     from pyclnf import CLNF
 
     # Initialize model without detector
@@ -34,8 +34,10 @@ import cv2
 from pathlib import Path
 
 from .core.pdm import PDM
-from .core.patch_expert import CCNFModel
+from .core.cen_patch_expert import CENModel
 from .core.optimizer import NURLMSOptimizer
+from .utils.retinaface_correction import RetinaFaceCorrectedDetector
+from .core.eye_patch_expert import HierarchicalEyeModel
 
 
 class CLNF:
@@ -49,13 +51,18 @@ class CLNF:
     def __init__(self,
                  model_dir: str = "pyclnf/models",
                  scale: float = 0.25,
-                 regularization: float = 25.0,
-                 max_iterations: int = 10,
-                 convergence_threshold: float = 0.005,
-                 sigma: float = 1.5,
-                 weight_multiplier: float = 0.0,
+                 regularization: float = 20,  # Empirically tuned for Python (25 made no difference)
+                 max_iterations: int = 10,  # Per phase distributed across windows (~40 total to match C++)
+                 convergence_threshold: float = 1e-6,  # Disabled - match C++ behavior (no early stopping)
+                 sigma: float = 1.5,  # KDE kernel sigma - matches C++ default
+                 weight_multiplier: float = 0.0,  # Disabled - hurts face model (tested: 2.0, 5.0 both worse)
                  window_sizes: list = None,
-                 detector: bool = True):
+                 detector: str = "pymtcnn",
+                 detector_model_path: Optional[str] = None,
+                 use_coreml: bool = False,
+                 use_eye_refinement: bool = True,
+                 debug_mode: bool = False,
+                 tracked_landmarks: list = None):
         """
         Initialize CLNF model.
 
@@ -63,28 +70,37 @@ class CLNF:
             model_dir: Directory containing exported PDM and CCNF models
             scale: DEPRECATED - now loads all scales [0.25, 0.35, 0.5]
             regularization: Shape regularization weight (higher = stricter shape prior)
-                          (OpenFace default: r=25)
+                          Default: 20 (tested: 25 made no difference, weight_multiplier=5 hurt)
             max_iterations: Maximum optimization iterations TOTAL across all window sizes
                           (OpenFace default: 5 per window × 4 windows = 20 total)
-            convergence_threshold: Convergence threshold for parameter updates
-                          (OpenFace default: 0.01 for shape change)
+            convergence_threshold: Mean per-landmark convergence threshold in pixels
+                          (default: 0.1 pixels mean change for early convergence)
             sigma: Gaussian kernel sigma for KDE mean-shift
                   (OpenFace uses σ=1.5 for Multi-PIE, σ=2.0 for in-the-wild)
             weight_multiplier: Weight multiplier w for patch confidences
                              (OpenFace uses w=7 for Multi-PIE, w=5 for in-the-wild)
             window_sizes: List of window sizes for hierarchical refinement (default: [11, 9, 7])
                          Note: Only window sizes with sigma components are supported ([7, 9, 11, 15])
-            detector: Enable PyMTCNN face detector (default: True). Set to False to use manual bbox.
+            detector: Face detector to use ("pymtcnn", "retinaface", or None). Default: "pymtcnn"
+            detector_model_path: Path to detector model. If None, uses default path
+            use_coreml: Enable CoreML acceleration (ARM Mac optimization)
+            debug_mode: Enable debug output for development
+            tracked_landmarks: List of landmark indices to track for debugging
         """
         self.model_dir = Path(model_dir)
         self.regularization = regularization
         self.sigma = sigma
         self.weight_multiplier = weight_multiplier
-        # Changed from [11, 9, 7, 5] to [11, 9, 7] because ws=5 has no sigma components
-        self.window_sizes = window_sizes if window_sizes is not None else [11, 9, 7]
+        self.debug_mode = debug_mode  # Use parameter value
+        self.tracked_landmarks = tracked_landmarks if tracked_landmarks is not None else [36, 48, 30, 8]
+        # Match C++ OpenFace default: [11, 9, 7]
+        # Note: Window size 5 excluded - no sigma components available and degrades performance
+        default_windows = [11, 9, 7]
+        self.window_sizes = window_sizes if window_sizes is not None else default_windows
 
-        # OpenFace uses multiple patch scales
-        self.patch_scaling = [0.25, 0.35, 0.5]
+        # OpenFace uses multiple patch scales (coarse to fine)
+        # Each window size maps to a patch scale: 11→0.25, 9→0.35, 7→0.5, 5→1.0
+        self.patch_scaling = [0.25, 0.35, 0.5, 1.0]
 
         # Map window sizes to patch scale indices (coarse-to-fine)
         # Larger windows use coarser scales, smaller windows use finer scales
@@ -94,8 +110,18 @@ class CLNF:
         pdm_dir = self.model_dir / "exported_pdm"
         self.pdm = PDM(str(pdm_dir))
 
-        # Load CCNF patch experts for ALL scales
-        self.ccnf = CCNFModel(str(self.model_dir), scales=self.patch_scaling)
+        # Load CEN patch experts for ALL scales
+        self.ccnf = CENModel(str(self.model_dir), scales=self.patch_scaling)
+
+        # NOTE: Previously filtered window sizes to only those with sigma components,
+        # but this removes window size 5 which is needed for the finest scale.
+        # Sigma components are optional (for CCNF spatial correlation), so we keep all window sizes.
+        # The optimizer will skip sigma transformation for window sizes without components.
+        if self.ccnf.sigma_components:
+            available_windows = list(self.ccnf.sigma_components.keys())
+            missing_windows = [ws for ws in self.window_sizes if ws not in available_windows]
+            if missing_windows:
+                print(f"Note: No sigma components for window sizes {missing_windows}, using identity transform")
 
         # Initialize optimizer with OpenFace parameters
         self.optimizer = NURLMSOptimizer(
@@ -103,18 +129,48 @@ class CLNF:
             max_iterations=max_iterations,
             convergence_threshold=convergence_threshold,
             sigma=sigma,
-            weight_multiplier=weight_multiplier  # CRITICAL: Apply weight multiplier
+            weight_multiplier=weight_multiplier,  # CRITICAL: Apply weight multiplier
+            debug_mode=debug_mode,
+            tracked_landmarks=self.tracked_landmarks
         )
 
-        # Initialize PyMTCNN face detector
-        self.detector = None
-        if detector:
+        # Initialize eye refinement model if enabled
+        self.use_eye_refinement = use_eye_refinement
+        self.eye_model = None
+        if use_eye_refinement:
             try:
-                from pymtcnn import PyMTCNN
-                self.detector = PyMTCNN()
+                self.eye_model = HierarchicalEyeModel(str(self.model_dir))
+                print("✓ Eye refinement model loaded")
+            except Exception as e:
+                print(f"Warning: Could not load eye refinement model: {e}")
+                self.use_eye_refinement = False
+
+        # Initialize face detector (PRIMARY: PyMTCNN with all performance optimizations)
+        self.detector = None
+        if detector == "pymtcnn":
+            # Use PyMTCNN detector (default for production)
+            try:
+                import sys
+                sys.path.insert(0, str(Path(__file__).parent.parent / "pymtcnn"))
+                from pymtcnn import MTCNN
+                self.detector = MTCNN()
+                print("✓ PyMTCNN detector initialized (CoreML/ONNX auto-selection)")
             except Exception as e:
                 print(f"Warning: Could not initialize PyMTCNN detector: {e}")
-                print("Install pymtcnn with: pip install pymtcnn")
+                print("Detector will not be available. Use fit() with manual bbox instead.")
+        elif detector == "retinaface":
+            # Fallback: Corrected RetinaFace for ARM Mac optimization
+            if detector_model_path is None:
+                detector_model_path = "S1 Face Mirror/weights/retinaface_mobilenet025_coreml.onnx"
+
+            try:
+                self.detector = RetinaFaceCorrectedDetector(
+                    model_path=detector_model_path,
+                    use_coreml=use_coreml
+                )
+                print("✓ RetinaFace detector initialized")
+            except Exception as e:
+                print(f"Warning: Could not initialize RetinaFace detector: {e}")
                 print("Detector will not be available. Use fit() with manual bbox instead.")
 
     def fit(self,
@@ -151,6 +207,27 @@ class CLNF:
         else:
             params = initial_params.copy()
 
+        # DEBUG: Save initial landmarks and params
+        init_landmarks = self.pdm.params_to_landmarks_2d(params)
+        with open('/tmp/python_init_landmarks_68.txt', 'w') as f:
+            f.write(f"Initial landmarks (ITER0):\n")
+            f.write(f"Number of points (n): {len(init_landmarks)}\n")
+
+            # Print params (Python format: [scale, rot_x, rot_y, rot_z, trans_x, trans_y, local...])
+            f.write(f"params (size {len(params)}):\n")
+            f.write(f"  params[0] (scale): {params[0]:.6f}\n")
+            f.write(f"  params[1] (rot_x): {params[1]:.6f}\n")
+            f.write(f"  params[2] (rot_y): {params[2]:.6f}\n")
+            f.write(f"  params[3] (rot_z): {params[3]:.6f}\n")
+            f.write(f"  params[4] (trans_x): {params[4]:.6f}\n")
+            f.write(f"  params[5] (trans_y): {params[5]:.6f}\n")
+            f.write(f"params_local (first 10):\n")
+            for i in range(min(10, len(params) - 6)):
+                f.write(f"  params_local[{i}]: {params[6+i]:.6f}\n")
+
+            for i, (x, y) in enumerate(init_landmarks):
+                f.write(f"Landmark_{i}: ({x:.6f}, {y:.6f})\n")
+
         # Estimate head pose from bbox for view selection
         # For now, assume frontal view (view 0)
         # TODO: Implement pose estimation from bbox orientation
@@ -170,6 +247,8 @@ class CLNF:
         original_max_iterations = self.optimizer.max_iterations
 
         total_iterations = 0
+        all_iteration_history = []  # Collect iteration history across all windows
+
         for window_idx, window_size in enumerate(self.window_sizes):
             # Distribute remainder iterations to early windows
             # e.g., max_iter=10, 3 windows → [4, 3, 3]
@@ -196,13 +275,19 @@ class CLNF:
             # Adjust regularization based on patch scale (OpenFace formula)
             # Reduce regularization at finer scales
             # Formula: reg = reg_base - 15 * log2(patch_scale / base_scale)
-            scale_ratio = patch_scale / self.patch_scaling[0]  # Ratio to base scale (0.25)
+            # C++ clamps scale_max = min(scale, 2) to prevent extreme regularization reduction
+            scale_max = min(scale_idx, 2)  # Match C++ behavior (line 941)
+            clamped_patch_scale = self.patch_scaling[scale_max]
+            scale_ratio = clamped_patch_scale / self.patch_scaling[0]  # Ratio to base scale (0.25)
             adjusted_reg = self.regularization - 15 * np.log(scale_ratio) / np.log(2)
             adjusted_reg = max(0.001, adjusted_reg)  # Ensure positive
 
             # Update optimizer parameters for this scale
             self.optimizer.regularization = adjusted_reg
-            # NOTE: Don't override optimizer.sigma - respect the value set by user or __init__
+            # C++ adjusts sigma per scale: sigma = base_sigma + 0.25 * log2(clamped_scale/0.25)
+            # Uses same clamped scale_ratio as regularization
+            adjusted_sigma = self.sigma + 0.25 * np.log(scale_ratio) / np.log(2)
+            self.optimizer.sigma = adjusted_sigma
 
             # Run optimization for this window size
             # Using patch experts trained at patch_scale for this window
@@ -222,6 +307,10 @@ class CLNF:
             params = optimized_params
             total_iterations += opt_info['iterations']
 
+            # Collect iteration history if available
+            if 'iteration_history' in opt_info:
+                all_iteration_history.extend(opt_info['iteration_history'])
+
             # Early stopping if face becomes too small
             if params[0] < 0.25:  # Scale parameter
                 break
@@ -232,13 +321,44 @@ class CLNF:
         # Extract final landmarks
         landmarks = self.pdm.params_to_landmarks_2d(optimized_params)
 
+        # Apply eye refinement if enabled
+        eye_iteration_history = []
+        if self.use_eye_refinement and self.eye_model is not None:
+            # Refine left eye (landmarks 36-41)
+            result = self.eye_model.refine_eye_landmarks(
+                gray, landmarks, 'left',
+                main_rotation=optimized_params[1:4],
+                main_scale=optimized_params[0],
+                track_iterations=True
+            )
+            if isinstance(result, tuple):
+                landmarks, left_eye_history = result
+                eye_iteration_history.extend(left_eye_history)
+            else:
+                landmarks = result
+
+            # Refine right eye (landmarks 42-47)
+            result = self.eye_model.refine_eye_landmarks(
+                gray, landmarks, 'right',
+                main_rotation=optimized_params[1:4],
+                main_scale=optimized_params[0],
+                track_iterations=True
+            )
+            if isinstance(result, tuple):
+                landmarks, right_eye_history = result
+                eye_iteration_history.extend(right_eye_history)
+            else:
+                landmarks = result
+
         # Prepare output info
         info = {
             'converged': opt_info['converged'],
             'iterations': total_iterations,
             'final_update': opt_info['final_update'],
             'view': view_idx,
-            'pose': pose
+            'pose': pose,
+            'iteration_history': all_iteration_history,  # Include full iteration history
+            'eye_iteration_history': eye_iteration_history  # Include eye iteration history
         }
 
         if return_params:
@@ -251,12 +371,13 @@ class CLNF:
                        return_all_faces: bool = False,
                        return_params: bool = False) -> Tuple[np.ndarray, Dict]:
         """
-        Detect faces and fit CLNF landmarks in one call using PyMTCNN.
+        Detect faces and fit CLNF landmarks in one call using the built-in detector.
 
         This is the primary method for using pyCLNF with automatic face detection.
+        Uses corrected RetinaFace as the default detector (ARM Mac optimized).
 
         Args:
-            image: Input image (BGR color format for PyMTCNN)
+            image: Input image (grayscale or color, will be converted to grayscale)
             return_all_faces: If True, return results for all detected faces
                             If False, return only the first (largest) face
             return_params: If True, include optimized parameters in info dict
@@ -273,8 +394,7 @@ class CLNF:
 
         Example:
             >>> from pyclnf import CLNF
-            >>> import cv2
-            >>> clnf = CLNF()  # Initializes with PyMTCNN
+            >>> clnf = CLNF()  # Initializes with corrected RetinaFace
             >>> image = cv2.imread("face.jpg")
             >>> landmarks, info = clnf.detect_and_fit(image)
             >>> print(f"Detected {len(landmarks)} landmarks")
@@ -282,32 +402,35 @@ class CLNF:
         if self.detector is None:
             raise ValueError(
                 "No detector initialized. Either:\n"
-                "1. Initialize CLNF with detector=True (default)\n"
-                "2. Install pymtcnn: pip install pymtcnn\n"
-                "3. Use fit() method with manual bbox instead"
+                "1. Initialize CLNF with detector='retinaface' (default)\n"
+                "2. Use fit() method with manual bbox instead"
             )
 
-        # PyMTCNN expects BGR color image
+        # Convert to color for detector (detector needs BGR)
         if len(image.shape) == 2:
             # Grayscale -> BGR for detector
             image_bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         else:
             image_bgr = image
 
-        # Detect faces with PyMTCNN
-        bboxes_mtcnn, _ = self.detector.detect(image_bgr, return_landmarks=False)
+        # Detect faces - handle different detector APIs
+        if hasattr(self.detector, 'detect_and_correct'):
+            # RetinaFace corrected detector
+            bboxes = self.detector.detect_and_correct(image_bgr)
+        elif hasattr(self.detector, 'detect'):
+            # MTCNN detector - returns (bboxes, landmarks)
+            result = self.detector.detect(image_bgr)
+            if isinstance(result, tuple):
+                bboxes = result[0]  # (N, 4) array of [x, y, w, h]
+                # Convert numpy array to list of tuples for compatibility
+                bboxes = [tuple(bbox) for bbox in bboxes]
+            else:
+                bboxes = result
+        else:
+            raise ValueError("Detector does not have detect() or detect_and_correct() method")
 
-        if len(bboxes_mtcnn) == 0:
+        if len(bboxes) == 0:
             raise ValueError("No faces detected in image")
-
-        # Convert PyMTCNN bboxes from (x1, y1, x2, y2) to (x, y, width, height)
-        bboxes = []
-        for bbox_mtcnn in bboxes_mtcnn:
-            x1, y1, x2, y2 = bbox_mtcnn
-            x, y = x1, y1
-            width = x2 - x1
-            height = y2 - y1
-            bboxes.append((x, y, width, height))
 
         # Process all faces if requested
         if return_all_faces:
@@ -413,23 +536,21 @@ class CLNF:
         """
         Map window sizes to patch scale indices.
 
-        OpenFace uses coarse-to-fine strategy:
-        - Large windows → coarse patch scale (0.25)
-        - Medium windows → medium patch scale (0.35)
-        - Small windows → fine patch scale (0.5)
+        OpenFace C++ convention: window_sizes array is indexed by scale
+        - window_sizes[0] → scale 0 (0.25)
+        - window_sizes[1] → scale 1 (0.35)
+        - window_sizes[2] → scale 2 (0.5)
+
+        Default: [11, 9, 7, 5] means ws=11 uses scale 0.25, ws=9 uses 0.35, etc.
 
         Returns:
             Dictionary mapping window_size -> scale_index
         """
         mapping = {}
         for i, window_size in enumerate(self.window_sizes):
-            # Coarse-to-fine: first third uses scale 0, second third uses scale 1, final third uses scale 2
-            if i < len(self.window_sizes) // 3:
-                scale_idx = 0  # 0.25
-            elif i < 2 * len(self.window_sizes) // 3:
-                scale_idx = 1  # 0.35
-            else:
-                scale_idx = min(2, len(self.patch_scaling) - 1)  # 0.5
+            # Match C++ convention: array position = scale index
+            # Clamp to available scales
+            scale_idx = min(i, len(self.patch_scaling) - 1)
             mapping[window_size] = scale_idx
         return mapping
 

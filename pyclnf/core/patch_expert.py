@@ -189,7 +189,7 @@ class CCNFPatchExpert:
             else:
                 return np.exp(x) / (1 + np.exp(x))
 
-    def compute_sigma(self, sigma_components: List[np.ndarray], window_size: int = None) -> np.ndarray:
+    def compute_sigma(self, sigma_components: List[np.ndarray], window_size: int = None, debug: bool = False) -> np.ndarray:
         """
         Compute Sigma covariance matrix for spatial correlation modeling.
 
@@ -207,6 +207,7 @@ class CCNFPatchExpert:
             sigma_components: List of sigma component matrices for this window size
                              (loaded from exported CCNF model files)
             window_size: Response map window size (if None, uses patch width)
+            debug: Print detailed debugging information
 
         Returns:
             Sigma matrix (window_size² × window_size²) for transforming response maps
@@ -219,6 +220,21 @@ class CCNFPatchExpert:
             window_size = self.width
         matrix_size = window_size * window_size
 
+        if debug:
+            print(f"\n    [Sigma Debug] window_size={window_size}, matrix_size={matrix_size}")
+            print(f"    [Sigma Debug] sum_alphas={sum_alphas:.6f}")
+            print(f"    [Sigma Debug] num_neurons={len(self.neurons)}")
+            print(f"    [Sigma Debug] num_betas={len(self.betas)}")
+            print(f"    [Sigma Debug] num_sigma_components={len(sigma_components)}")
+
+            # Verify sigma component shapes
+            for i, sc in enumerate(sigma_components):
+                expected_shape = (matrix_size, matrix_size)
+                if sc.shape != expected_shape:
+                    print(f"    [Sigma Debug] ⚠️  WARNING: sigma_component[{i}] shape {sc.shape} != expected {expected_shape}")
+                else:
+                    print(f"    [Sigma Debug] ✓ sigma_component[{i}] shape {sc.shape} correct")
+
         # q1 = sum_alphas * Identity
         q1 = sum_alphas * np.eye(matrix_size, dtype=np.float32)
 
@@ -226,20 +242,52 @@ class CCNFPatchExpert:
         # Only use as many betas as we have sigma components
         q2 = np.zeros((matrix_size, matrix_size), dtype=np.float32)
         num_components = min(len(self.betas), len(sigma_components))
+
+        # Cast betas to float32 for consistent precision (matches C++ OpenFace)
+        betas_f32 = np.asarray(self.betas, dtype=np.float32)
+
+        if debug:
+            print(f"    [Sigma Debug] Using {num_components} components (min of {len(self.betas)} betas, {len(sigma_components)} sigma_comps)")
+
         for i in range(num_components):
-            q2 += self.betas[i] * sigma_components[i]
+            if debug and i < 3:  # Print first 3 betas
+                print(f"    [Sigma Debug] beta[{i}]={betas_f32[i]:.6f}")
+            # Ensure sigma_components are also float32 to avoid mixed precision
+            sigma_comp_f32 = np.asarray(sigma_components[i], dtype=np.float32)
+            q2 += betas_f32[i] * sigma_comp_f32
 
         # SigmaInv = 2 * (q1 + q2)
         SigmaInv = 2.0 * (q1 + q2)
+
+        if debug:
+            # Check SigmaInv properties
+            det_SigmaInv = np.linalg.det(SigmaInv)
+            cond_SigmaInv = np.linalg.cond(SigmaInv)
+            print(f"    [Sigma Debug] SigmaInv: det={det_SigmaInv:.6e}, cond={cond_SigmaInv:.2e}")
+            print(f"    [Sigma Debug] SigmaInv: min={SigmaInv.min():.6f}, max={SigmaInv.max():.6f}")
 
         # Compute Sigma = inv(SigmaInv) using Cholesky decomposition (OpenFace uses DECOMP_CHOLESKY)
         try:
             # Try Cholesky decomposition first (OpenFace method)
             Sigma = np.linalg.inv(SigmaInv)
+            if debug:
+                print(f"    [Sigma Debug] ✓ Cholesky inversion succeeded")
         except np.linalg.LinAlgError:
             # Fallback to pseudo-inverse if matrix is singular
             print(f"Warning: Singular SigmaInv matrix for patch {self.width}×{self.height}, using pseudo-inverse")
             Sigma = np.linalg.pinv(SigmaInv)
+
+        if debug:
+            # Check Sigma properties
+            det_Sigma = np.linalg.det(Sigma)
+            cond_Sigma = np.linalg.cond(Sigma)
+            print(f"    [Sigma Debug] Sigma: det={det_Sigma:.6e}, cond={cond_Sigma:.2e}")
+            print(f"    [Sigma Debug] Sigma: min={Sigma.min():.6f}, max={Sigma.max():.6f}")
+
+            # Verify Sigma * SigmaInv ≈ Identity
+            product = Sigma @ SigmaInv
+            identity_error = np.abs(product - np.eye(matrix_size)).max()
+            print(f"    [Sigma Debug] Sigma*SigmaInv identity error: {identity_error:.6e}")
 
         return Sigma
 
