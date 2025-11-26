@@ -86,7 +86,7 @@ class EyeCCNFPatchExpert:
         self.patch_dir = Path(patch_dir)
 
         # Load patch metadata
-        meta = np.load(self.patch_dir / 'metadata.npz')
+        meta = np.load(self.patch_dir / 'metadata.npz', allow_pickle=True)
         self.width = int(meta['width'])
         self.height = int(meta['height'])
         self.betas = meta['betas']
@@ -98,7 +98,7 @@ class EyeCCNFPatchExpert:
 
         self.neurons = []
         for neuron_file in neuron_files:
-            neuron_data = np.load(neuron_file)
+            neuron_data = np.load(neuron_file, allow_pickle=True)
             neuron = {
                 'type': int(neuron_data['neuron_type']),
                 'weights': neuron_data['weights'],

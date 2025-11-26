@@ -26,9 +26,9 @@ class EyePDM:
         self.model_dir = Path(model_dir)
 
         # Load PDM components
-        self.mean_shape = np.load(self.model_dir / 'mean_shape.npy')  # (3n, 1) = (84, 1)
-        self.princ_comp = np.load(self.model_dir / 'eigenvectors.npy')  # (3n, m) = (84, 10)
-        self.eigen_values = np.load(self.model_dir / 'eigenvalues.npy')  # (1, m) = (1, 10)
+        self.mean_shape = np.load(self.model_dir / 'mean_shape.npy', allow_pickle=True)  # (3n, 1) = (84, 1)
+        self.princ_comp = np.load(self.model_dir / 'eigenvectors.npy', allow_pickle=True)  # (3n, m) = (84, 10)
+        self.eigen_values = np.load(self.model_dir / 'eigenvalues.npy', allow_pickle=True)  # (1, m) = (1, 10)
 
         # Extract dimensions
         self.n_points = self.mean_shape.shape[0] // 3  # 28 landmarks
