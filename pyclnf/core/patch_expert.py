@@ -26,6 +26,21 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from models.openface_loader import load_sigma_components
 
+# CUDA support (lazy import)
+_ccnf_cuda_available = None
+
+
+def _check_cuda_available():
+    """Check if CUDA is available for CCNF."""
+    global _ccnf_cuda_available
+    if _ccnf_cuda_available is None:
+        try:
+            from .cuda_backend import is_cuda_available
+            _ccnf_cuda_available = is_cuda_available()
+        except ImportError:
+            _ccnf_cuda_available = False
+    return _ccnf_cuda_available
+
 
 class CCNFPatchExpert:
     """CCNF patch expert for a single landmark at a specific scale."""
@@ -310,18 +325,27 @@ class CCNFModel:
     - Multiple views (face orientations: frontal, profile, etc.)
     - Multiple scales (0.25, 0.35, 0.5 × interocular distance)
     - 68 landmarks per view
+
+    Supports optional CUDA acceleration for batch inference.
     """
 
-    def __init__(self, model_base_dir: str, scales: Optional[List[float]] = None):
+    def __init__(self, model_base_dir: str, scales: Optional[List[float]] = None, device: str = 'auto'):
         """
         Load CCNF model from exported NumPy files.
 
         Args:
             model_base_dir: Base directory containing exported_ccnf_* folders
             scales: List of scales to load (default: [0.25, 0.35, 0.5])
+            device: Compute device - 'auto' (default), 'cuda', or 'cpu'
         """
         self.model_base_dir = Path(model_base_dir)
         self.scales = scales or [0.25, 0.35, 0.5]
+
+        # Determine device
+        if device == 'auto':
+            self.device = 'cuda' if _check_cuda_available() else 'cpu'
+        else:
+            self.device = device
 
         # Load sigma components for CCNF spatial correlation modeling
         self.sigma_components = load_sigma_components(str(self.model_base_dir))
@@ -338,6 +362,35 @@ class CCNFModel:
                 self.scale_models[scale] = self._load_scale_model(scale_dir)
             else:
                 print(f"Warning: Scale {scale} model not found at {scale_dir}")
+
+        # Initialize CUDA processors for each scale if CUDA is enabled
+        self.cuda_processors = {}
+        if self.device == 'cuda' and _check_cuda_available():
+            self._initialize_cuda_processors()
+
+    def _initialize_cuda_processors(self):
+        """Initialize CUDA batch processors for each scale."""
+        try:
+            from .ccnf_cuda import CCNFBatchProcessor
+
+            for scale, scale_data in self.scale_models.items():
+                # Get patches from frontal view (view 0)
+                if 0 in scale_data['views']:
+                    patches = scale_data['views'][0]['patches']
+                    processor = CCNFBatchProcessor(device='cuda')
+                    processor.initialize_experts(patches)
+                    self.cuda_processors[scale] = processor
+
+            if self.cuda_processors:
+                print(f"[OK] CCNF CUDA acceleration enabled for {len(self.cuda_processors)} scales")
+        except Exception as e:
+            print(f"Warning: Could not initialize CUDA processors: {e}")
+            self.cuda_processors = {}
+            self.device = 'cpu'
+
+    def get_cuda_processor(self, scale: float):
+        """Get the CUDA processor for a specific scale, if available."""
+        return self.cuda_processors.get(scale)
 
     def _load_scale_model(self, scale_dir: Path) -> dict:
         """
