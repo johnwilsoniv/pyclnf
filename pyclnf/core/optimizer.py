@@ -144,6 +144,14 @@ class NURLMSOptimizer:
         self.debug_mode = debug_mode
         self.tracked_landmarks = tracked_landmarks if tracked_landmarks is not None else [36, 48, 30, 8]
 
+        # Response map caching for video-mode temporal coherence
+        # When landmarks move less than threshold between frames, reuse cached response maps
+        self.cached_response_maps = None
+        self.cached_landmarks = None
+        self.response_reuse_threshold = 1.5  # pixels - max landmark displacement to reuse cache
+        self.cache_max_age = 5  # frames - max age before forcing recompute
+        self.cache_age = 0
+
         # Diagnostic tracking for late-stage convergence analysis
         self._last_hessian_cond = None
         self._last_reg_ratio = None
@@ -228,10 +236,21 @@ class NURLMSOptimizer:
 
         # 4. PRECOMPUTE response maps ONCE at initial positions (C++ line 798)
         # These are reused for ALL iterations in both rigid and non-rigid phases!
-        response_maps = self._precompute_response_maps(
-            landmarks_2d_initial, patch_experts, image, window_size,
-            sim_img_to_ref, sim_ref_to_img, sigma_components, iteration=0
-        )
+        # VIDEO-MODE OPTIMIZATION: Check if we can reuse cached response maps
+        if self._should_reuse_cache(landmarks_2d_initial):
+            # Reuse cached response maps - significant speedup for video
+            response_maps = self.cached_response_maps
+            self.cache_age += 1
+        else:
+            # Compute fresh response maps
+            response_maps = self._precompute_response_maps(
+                landmarks_2d_initial, patch_experts, image, window_size,
+                sim_img_to_ref, sim_ref_to_img, sigma_components, iteration=0
+            )
+            # Update cache for next frame
+            self.cached_response_maps = response_maps
+            self.cached_landmarks = landmarks_2d_initial.copy()
+            self.cache_age = 0
 
         # Debug: Print initial landmarks
         if self.debug_mode:
@@ -255,8 +274,12 @@ class NURLMSOptimizer:
             # Compute current shape from rigid params
             current_landmarks = pdm.params_to_landmarks_2d(rigid_params)
 
-            # NOTE: C++ OpenFace does NOT have early stopping - runs full iteration count
-            # Previous convergence check removed to match C++ behavior
+            # Early stopping: check if landmarks have converged
+            if previous_landmarks is not None and self.convergence_threshold > 0:
+                landmark_change = np.linalg.norm(current_landmarks - previous_landmarks, axis=1).mean()
+                if landmark_change < self.convergence_threshold:
+                    rigid_converged = True
+                    break
             previous_landmarks = current_landmarks.copy()
 
             # Compute mean-shift using PRECOMPUTED response maps and current offsets
@@ -357,8 +380,12 @@ class NURLMSOptimizer:
                     print(f"[DEBUG]   Landmark {lm_idx}: current=({current_landmarks[lm_idx][0]:.4f}, {current_landmarks[lm_idx][1]:.4f})")
                     print(f"[DEBUG]   Landmark {lm_idx}: offset=({offset_x:.4f}, {offset_y:.4f})")
 
-            # NOTE: C++ OpenFace does NOT have early stopping - runs full iteration count
-            # Previous convergence check removed to match C++ behavior
+            # Early stopping: check if landmarks have converged
+            if previous_landmarks is not None and self.convergence_threshold > 0:
+                landmark_change = np.linalg.norm(current_landmarks - previous_landmarks, axis=1).mean()
+                if landmark_change < self.convergence_threshold:
+                    nonrigid_converged = True
+                    break
             previous_landmarks = current_landmarks.copy()
 
             # Compute mean-shift using PRECOMPUTED response maps and current offsets
@@ -463,6 +490,34 @@ class NURLMSOptimizer:
         Lambda_inv[6:] = 1.0 / eigenvalues  # No epsilon needed - matches C++ exactly
 
         return Lambda_inv
+
+    def _should_reuse_cache(self, current_landmarks: np.ndarray) -> bool:
+        """
+        Check if cached response maps can be reused for the current frame.
+
+        Video-mode optimization: when landmarks haven't moved much between frames,
+        we can reuse the response maps from the previous frame instead of recomputing.
+        This can provide 50-100% speedup since response map computation is 40-50% of CLNF time.
+
+        Args:
+            current_landmarks: Current 2D landmark positions (n_points, 2)
+
+        Returns:
+            True if cache can be reused, False if recomputation is needed
+        """
+        # No cache available
+        if self.cached_response_maps is None or self.cached_landmarks is None:
+            return False
+
+        # Cache too old - force recompute to prevent drift
+        if self.cache_age >= self.cache_max_age:
+            return False
+
+        # Check if landmarks are close enough to cached positions
+        displacement = np.linalg.norm(current_landmarks - self.cached_landmarks, axis=1)
+        max_displacement = displacement.max()
+
+        return max_displacement < self.response_reuse_threshold
 
     def _precompute_response_maps(self,
                                    landmarks_2d: np.ndarray,
