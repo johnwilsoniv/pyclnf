@@ -3,13 +3,14 @@
 CEN (Convolutional Expert Network) patch expert loader and inference.
 
 Loads and runs patch expert models from OpenFace 2.2's .dat format.
+Supports CPU (NumPy/Numba) and CUDA (PyTorch) backends.
 """
 
 import numpy as np
 import cv2
 from pathlib import Path
 import struct
-from typing import List
+from typing import List, Optional
 
 # Try to import numba for JIT compilation (optional)
 try:
@@ -22,6 +23,42 @@ except ImportError:
         def decorator(func):
             return func
         return decorator if not args else decorator(args[0])
+
+# CUDA support (lazy import)
+_cuda_processor = None
+_cuda_backend = None
+
+
+def _get_cuda_backend():
+    """Lazy import CUDA backend module."""
+    global _cuda_backend
+    if _cuda_backend is None:
+        try:
+            from . import cuda_backend
+            _cuda_backend = cuda_backend
+        except ImportError:
+            _cuda_backend = False  # Mark as unavailable
+    return _cuda_backend if _cuda_backend is not False else None
+
+
+def _get_cuda_processor():
+    """Get or create the global CUDA processor."""
+    global _cuda_processor
+    if _cuda_processor is None:
+        backend = _get_cuda_backend()
+        if backend and backend.is_cuda_available():
+            try:
+                from .cen_cuda import CENBatchProcessor
+                _cuda_processor = CENBatchProcessor(device='cuda')
+            except ImportError:
+                _cuda_processor = False  # Mark as unavailable
+    return _cuda_processor if _cuda_processor is not False else None
+
+
+def is_cuda_available() -> bool:
+    """Check if CUDA acceleration is available for CEN inference."""
+    backend = _get_cuda_backend()
+    return backend is not None and backend.is_cuda_available()
 
 
 class CENPatchExpert:
@@ -292,18 +329,26 @@ class CENModel:
     CEN model wrapper that matches CCNFModel interface for pyclnf integration.
 
     Provides scale_models dict structure expected by clnf.py.
+    Supports optional CUDA acceleration for batch inference.
     """
 
-    def __init__(self, model_base_dir: str, scales: List[float] = None):
+    def __init__(self, model_base_dir: str, scales: List[float] = None, device: str = 'auto'):
         """
         Load CEN patch experts and wrap in CCNFModel-compatible interface.
 
         Args:
             model_base_dir: Base directory containing patch_experts/ folder with .dat files
             scales: List of scales to load (default: [0.25, 0.35, 0.5])
+            device: Compute device - 'auto' (default), 'cuda', or 'cpu'
         """
         self.model_base_dir = Path(model_base_dir)
         self.scales = scales or [0.25, 0.35, 0.5]
+
+        # Determine device
+        if device == 'auto':
+            self.device = 'cuda' if is_cuda_available() else 'cpu'
+        else:
+            self.device = device
 
         # Load CEN patch experts
         self.cen_experts = CENPatchExperts(model_base_dir)
@@ -364,6 +409,33 @@ class CENModel:
                     }
                 }
             }
+
+        # Initialize CUDA processors for each scale if CUDA is enabled
+        self.cuda_processors = {}
+        if self.device == 'cuda' and is_cuda_available():
+            self._initialize_cuda_processors()
+
+    def _initialize_cuda_processors(self):
+        """Initialize CUDA batch processors for each scale."""
+        try:
+            from .cen_cuda import CENBatchProcessor
+
+            for scale, scale_data in self.scale_models.items():
+                patches = scale_data['views'][0]['patches']
+                processor = CENBatchProcessor(device='cuda')
+                processor.initialize_experts(patches)
+                self.cuda_processors[scale] = processor
+
+            if self.cuda_processors:
+                print(f"[OK] CUDA acceleration enabled for {len(self.cuda_processors)} scales")
+        except Exception as e:
+            print(f"Warning: Could not initialize CUDA processors: {e}")
+            self.cuda_processors = {}
+            self.device = 'cpu'
+
+    def get_cuda_processor(self, scale: float) -> Optional['CENBatchProcessor']:
+        """Get the CUDA processor for a specific scale, if available."""
+        return self.cuda_processors.get(scale)
 
 
 class CENPatchExperts:

@@ -34,7 +34,7 @@ import cv2
 from pathlib import Path
 
 from .core.pdm import PDM
-from .core.cen_patch_expert import CENModel
+from .core.patch_expert import CCNFModel
 from .core.optimizer import NURLMSOptimizer
 from .utils.retinaface_correction import RetinaFaceCorrectedDetector
 from .core.eye_patch_expert import HierarchicalEyeModel
@@ -62,7 +62,8 @@ class CLNF:
                  use_coreml: bool = False,
                  use_eye_refinement: bool = True,
                  debug_mode: bool = False,
-                 tracked_landmarks: list = None):
+                 tracked_landmarks: list = None,
+                 device: str = "auto"):
         """
         Initialize CLNF model.
 
@@ -86,6 +87,8 @@ class CLNF:
             use_coreml: Enable CoreML acceleration (ARM Mac optimization)
             debug_mode: Enable debug output for development
             tracked_landmarks: List of landmark indices to track for debugging
+            device: Compute device for CEN inference - "auto" (default), "cuda", or "cpu"
+                   "auto" uses CUDA if available, otherwise falls back to CPU
         """
         self.model_dir = Path(model_dir)
         self.regularization = regularization
@@ -106,12 +109,15 @@ class CLNF:
         # Larger windows use coarser scales, smaller windows use finer scales
         self.window_to_scale = self._map_windows_to_scales()
 
+        # Store device setting
+        self.device = device
+
         # Load PDM (shape model)
         pdm_dir = self.model_dir / "exported_pdm"
         self.pdm = PDM(str(pdm_dir))
 
-        # Load CEN patch experts for ALL scales
-        self.ccnf = CENModel(str(self.model_dir), scales=self.patch_scaling)
+        # Load CCNF patch experts for ALL scales (with optional CUDA acceleration)
+        self.ccnf = CCNFModel(str(self.model_dir), scales=self.patch_scaling, device=device)
 
         # NOTE: Previously filtered window sizes to only those with sigma components,
         # but this removes window size 5 which is needed for the finest scale.
@@ -289,6 +295,9 @@ class CLNF:
             adjusted_sigma = self.sigma + 0.25 * np.log(scale_ratio) / np.log(2)
             self.optimizer.sigma = adjusted_sigma
 
+            # Get CUDA processor for this scale (if available)
+            cuda_processor = self.ccnf.get_cuda_processor(patch_scale)
+
             # Run optimization for this window size
             # Using patch experts trained at patch_scale for this window
             # CRITICAL: Pass patch_scaling to enable image warping
@@ -300,7 +309,8 @@ class CLNF:
                 weights=weights,  # CRITICAL: Pass patch confidence weights
                 window_size=window_size,
                 patch_scaling=patch_scale,  # CRITICAL: Enable image warping to reference coordinates
-                sigma_components=self.ccnf.sigma_components  # Enable CCNF spatial correlation modeling
+                sigma_components=self.ccnf.sigma_components,  # Enable CCNF spatial correlation modeling
+                cuda_processor=cuda_processor  # GPU acceleration if available
             )
 
             # Update params for next iteration

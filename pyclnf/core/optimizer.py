@@ -166,7 +166,8 @@ class NURLMSOptimizer:
                  weights: Optional[np.ndarray] = None,
                  window_size: int = 11,
                  patch_scaling: float = 0.25,
-                 sigma_components: dict = None) -> Tuple[np.ndarray, dict]:
+                 sigma_components: dict = None,
+                 cuda_processor=None) -> Tuple[np.ndarray, dict]:
         """
         Optimize PDM parameters to fit landmarks to image.
 
@@ -179,6 +180,7 @@ class NURLMSOptimizer:
             window_size: Search window size for mean-shift (default: 11)
             patch_scaling: Scale at which patches were trained (0.25, 0.35, or 0.5)
                           Used to create reference shape for warping
+            cuda_processor: Optional CENBatchProcessor for GPU acceleration
 
         Returns:
             optimized_params: Optimized parameter vector
@@ -245,7 +247,8 @@ class NURLMSOptimizer:
             # Compute fresh response maps
             response_maps = self._precompute_response_maps(
                 landmarks_2d_initial, patch_experts, image, window_size,
-                sim_img_to_ref, sim_ref_to_img, sigma_components, iteration=0
+                sim_img_to_ref, sim_ref_to_img, sigma_components, iteration=0,
+                cuda_processor=cuda_processor
             )
             # Update cache for next frame
             self.cached_response_maps = response_maps
@@ -528,7 +531,8 @@ class NURLMSOptimizer:
                                    sim_ref_to_img: np.ndarray = None,
                                    sigma_components: dict = None,
                                    iteration: int = None,
-                                   use_dual_patch: bool = True) -> dict:
+                                   use_dual_patch: bool = True,
+                                   cuda_processor=None) -> dict:
         """
         Precompute response maps at initial landmark positions.
 
@@ -548,6 +552,7 @@ class NURLMSOptimizer:
             sim_img_to_ref: Similarity transform (image → reference)
             sim_ref_to_img: Similarity transform (reference → image)
             use_dual_patch: If True, use dual-patch processing
+            cuda_processor: Optional CENBatchProcessor for GPU acceleration
 
         Returns:
             response_maps: Dict mapping landmark_idx -> response_map array
@@ -564,7 +569,8 @@ class NURLMSOptimizer:
                 sim_img_to_ref if use_warping else None,
                 sim_ref_to_img if use_warping else None,
                 sigma_components,
-                landmark_idx, iteration
+                landmark_idx, iteration,
+                cuda_processor=cuda_processor
             )
 
             # Dual-patch processing: also extract from mirror landmark location
@@ -1027,6 +1033,117 @@ class NURLMSOptimizer:
 
         return ms_x, ms_y
 
+    def _compute_response_cuda(self,
+                               area_of_interest: np.ndarray,
+                               landmark_idx: int,
+                               cuda_processor,
+                               patch_expert) -> np.ndarray:
+        """
+        Compute response map using CUDA acceleration.
+
+        This extracts patches using im2col on CPU, then runs the neural network
+        forward pass on GPU for faster inference.
+
+        Args:
+            area_of_interest: Warped image region (H, W) float32
+            landmark_idx: Index of the landmark
+            cuda_processor: CENBatchProcessor with initialized experts
+            patch_expert: CPU patch expert (for dimensions)
+
+        Returns:
+            response_map: (response_height, response_width) float32 array
+        """
+        # Get dimensions
+        width = patch_expert.width_support
+        height = patch_expert.height_support
+
+        m, n = area_of_interest.shape
+        response_height = m - height + 1
+        response_width = n - width + 1
+        num_patches = response_height * response_width
+
+        # Extract patches using im2col (CPU) - this creates (num_patches, height, width) array
+        patches = np.empty((num_patches, height, width), dtype=np.float32)
+
+        idx = 0
+        for j in range(response_width):  # X positions (columns) - column-major order
+            for i in range(response_height):  # Y positions (rows)
+                patches[idx] = area_of_interest[i:i+height, j:j+width]
+                idx += 1
+
+        # Run through CUDA processor
+        responses = cuda_processor.process_single(landmark_idx, patches)
+
+        # Reshape to response map (column-major order to match CPU implementation)
+        response_map = responses.reshape(response_height, response_width, order='F')
+
+        return response_map.astype(np.float32)
+
+    def _compute_response_ccnf_cuda(self,
+                                    area_of_interest: np.ndarray,
+                                    landmark_idx: int,
+                                    cuda_processor,
+                                    patch_expert,
+                                    window_size: int) -> np.ndarray:
+        """
+        Compute CCNF response map using CUDA acceleration.
+
+        Extracts patches using sliding window on CPU, then runs batched
+        normalized cross-correlation on GPU.
+
+        Args:
+            area_of_interest: Warped image region (H, W) uint8 or float32
+            landmark_idx: Index of the landmark
+            cuda_processor: CCNFBatchProcessor with initialized experts
+            patch_expert: CPU patch expert (for dimensions)
+            window_size: Response map window size
+
+        Returns:
+            response_map: (window_size, window_size) float32 array
+        """
+        # Get patch dimensions
+        patch_width = patch_expert.width
+        patch_height = patch_expert.height
+
+        # Extract all patches using sliding window
+        m, n = area_of_interest.shape
+        num_patches = window_size * window_size
+        patches = np.empty((num_patches, patch_height, patch_width), dtype=np.float32)
+
+        # Calculate starting position (center the window)
+        center = (m - 1) // 2
+        half_window = window_size // 2
+        start_y = center - half_window
+        start_x = center - half_window
+
+        idx = 0
+        for i in range(window_size):
+            for j in range(window_size):
+                py = start_y + i
+                px = start_x + j
+
+                # Extract patch centered at (px, py)
+                y1 = py - patch_height // 2
+                x1 = px - patch_width // 2
+                y2 = y1 + patch_height
+                x2 = x1 + patch_width
+
+                # Bounds check
+                if y1 >= 0 and x1 >= 0 and y2 <= m and x2 <= n:
+                    patches[idx] = area_of_interest[y1:y2, x1:x2].astype(np.float32)
+                else:
+                    # Out of bounds - fill with zeros (will give low response)
+                    patches[idx] = 0.0
+                idx += 1
+
+        # Run through CUDA processor
+        responses = cuda_processor.process_single(landmark_idx, patches)
+
+        # Reshape to response map
+        response_map = responses.reshape(window_size, window_size)
+
+        return response_map.astype(np.float32)
+
     def _compute_response_map(self,
                              image: np.ndarray,
                              center_x: float,
@@ -1038,7 +1155,8 @@ class NURLMSOptimizer:
                              sigma_components: dict = None,
                              landmark_idx: int = None,
                              iteration: int = None,
-                             is_mirror_patch: bool = False) -> Optional[np.ndarray]:
+                             is_mirror_patch: bool = False,
+                             cuda_processor=None) -> Optional[np.ndarray]:
         """
         Compute response map for a landmark in a window around current position.
 
@@ -1054,6 +1172,7 @@ class NURLMSOptimizer:
             window_size: Size of search window
             sim_img_to_ref: Optional 2x3 similarity transform (IMAGE → REFERENCE)
             is_mirror_patch: If True, this is a secondary patch from mirror location (suppress debug)
+            cuda_processor: Optional CENBatchProcessor for GPU acceleration
 
         Returns:
             response_map: (window_size, window_size) array of patch responses
@@ -1136,7 +1255,15 @@ class NURLMSOptimizer:
                     # Save a copy to compare
                     np.save(f'/tmp/area_of_interest_lm{landmark_idx}_before_response.npy', area_of_interest.copy())
 
-                response_map = patch_expert.response(area_of_interest)
+                # Use CUDA processor if available and expert is initialized
+                if cuda_processor is not None and cuda_processor.is_initialized() and landmark_idx in cuda_processor.experts:
+                    # CUDA path: extract patches with im2col, run on GPU
+                    response_map = self._compute_response_cuda(
+                        area_of_interest, landmark_idx, cuda_processor, patch_expert
+                    )
+                else:
+                    # CPU path: use standard response() method
+                    response_map = patch_expert.response(area_of_interest)
 
                 # DEBUG: Check response_map after calling response()
                 if landmark_idx in (36, 42) and iteration == 0 and self.debug_mode and not is_mirror_patch:
@@ -1145,25 +1272,32 @@ class NURLMSOptimizer:
                     print(f"[PY][DEBUG][LM{landmark_idx}]   min={response_map.min():.6f}, max={response_map.max():.6f}, mean={response_map.mean():.6f}")
                     print(f"[PY][DEBUG][LM{landmark_idx}]   peak: {np.unravel_index(np.argmax(response_map), response_map.shape)} = {response_map.max():.6f}")
             else:
-                # CCNF: Nested loop to evaluate each position
-                start_x = center_warped - half_window
-                start_y = center_warped - half_window
+                # CCNF: Use CUDA if available, otherwise nested loop
+                if cuda_processor is not None and cuda_processor.is_initialized() and landmark_idx in cuda_processor.experts:
+                    # CUDA path: batch all patches through GPU
+                    response_map = self._compute_response_ccnf_cuda(
+                        area_of_interest, landmark_idx, cuda_processor, patch_expert, window_size
+                    )
+                else:
+                    # CPU path: Nested loop to evaluate each position
+                    start_x = center_warped - half_window
+                    start_y = center_warped - half_window
 
-                for i in range(window_size):
-                    for j in range(window_size):
-                        patch_x = start_x + j
-                        patch_y = start_y + i
+                    for i in range(window_size):
+                        for j in range(window_size):
+                            patch_x = start_x + j
+                            patch_y = start_y + i
 
-                        # Extract patch from warped area_of_interest
-                        patch = self._extract_patch(
-                            area_of_interest, patch_x, patch_y,
-                            patch_expert.width, patch_expert.height
-                        )
+                            # Extract patch from warped area_of_interest
+                            patch = self._extract_patch(
+                                area_of_interest, patch_x, patch_y,
+                                patch_expert.width, patch_expert.height
+                            )
 
-                        if patch is not None:
-                            response_map[i, j] = patch_expert.compute_response(patch)
-                        else:
-                            response_map[i, j] = -1e10
+                            if patch is not None:
+                                response_map[i, j] = patch_expert.compute_response(patch)
+                            else:
+                                response_map[i, j] = -1e10
         else:
             # NO WARPING: Direct extraction from image (not typically used with OpenFace)
             # Check if this is CEN (has response() method) or CCNF (has compute_response())
