@@ -729,6 +729,73 @@ class PDM:
 
         return np.array([pitch, yaw, roll], dtype=np.float32)
 
+    def fit_to_landmarks_2d(self, landmarks_2d: np.ndarray, current_params: np.ndarray,
+                             reg_factor: float = 1.0, max_iter: int = 20,
+                             convergence_thresh: float = 0.001) -> np.ndarray:
+        """
+        Fit PDM parameters to 2D landmarks using Gauss-Newton optimization.
+
+        This implements OpenFace's CalcParams + CalcShape2D which is called after
+        eye refinement to re-fit the main 68-point model to the refined landmarks.
+
+        The C++ does this in LandmarkDetectorModel.cpp:771 after DetectLandmarks
+        completes for the eye hierarchy model.
+
+        Args:
+            landmarks_2d: Target 2D landmarks, shape (68, 2)
+            current_params: Current parameter estimate (used for initialization)
+            reg_factor: Regularization factor for shape parameters (default: 1.0)
+            max_iter: Maximum optimization iterations (default: 20)
+            convergence_thresh: Convergence threshold for parameter change (default: 0.001)
+
+        Returns:
+            fitted_params: Optimized parameter vector
+        """
+        params = current_params.copy().flatten()
+
+        # Target landmarks as flattened vector [x0, y0, x1, y1, ...]
+        target = landmarks_2d.flatten().astype(np.float64)
+
+        for iteration in range(max_iter):
+            # Get current 2D landmarks
+            current_2d = self.params_to_landmarks_2d(params).flatten()
+
+            # Compute residual
+            residual = target - current_2d
+
+            # Compute Jacobian
+            J = self.compute_jacobian(params)  # Shape: (2*n_points, n_params)
+
+            # Build Hessian with regularization
+            # H = J^T J + lambda * diag(eigenvalues)
+            JtJ = J.T @ J
+
+            # Add regularization for shape parameters (indices 6+)
+            reg_diag = np.zeros(self.n_params)
+            reg_diag[6:] = reg_factor / (self.eigen_values.flatten() + 1e-10)
+            H = JtJ + np.diag(reg_diag)
+
+            # Solve for parameter update: delta = H^(-1) J^T residual
+            g = J.T @ residual
+
+            try:
+                delta_p = np.linalg.solve(H, g)
+            except np.linalg.LinAlgError:
+                # Singular matrix - use pseudoinverse
+                delta_p = np.linalg.lstsq(H, g, rcond=None)[0]
+
+            # Update parameters using proper rotation composition
+            params = self.update_params(params, delta_p)
+
+            # Clamp parameters
+            params = self.clamp_params(params, n_std=3.0)
+
+            # Check convergence
+            if np.linalg.norm(delta_p) < convergence_thresh:
+                break
+
+        return params
+
     def get_info(self) -> dict:
         """Get PDM information."""
         return {
