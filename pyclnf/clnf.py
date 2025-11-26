@@ -53,7 +53,7 @@ class CLNF:
                  scale: float = 0.25,
                  regularization: float = 20,  # Empirically tuned for Python (25 made no difference)
                  max_iterations: int = 10,  # Per phase distributed across windows (~40 total to match C++)
-                 convergence_threshold: float = 1e-6,  # Disabled - match C++ behavior (no early stopping)
+                 convergence_threshold: float = 0.1,  # Early stopping: stop when mean landmark change < 0.1px
                  sigma: float = 1.5,  # KDE kernel sigma - matches C++ default
                  weight_multiplier: float = 0.0,  # Disabled - hurts face model (tested: 2.0, 5.0 both worse)
                  window_sizes: list = None,
@@ -349,6 +349,15 @@ class CLNF:
                 eye_iteration_history.extend(right_eye_history)
             else:
                 landmarks = result
+
+            # Re-fit main PDM to refined landmarks (like C++ CalcParams + CalcShape2D)
+            # This is critical for propagating eye refinement through the shape model
+            optimized_params = self.pdm.fit_to_landmarks_2d(
+                landmarks, optimized_params,
+                reg_factor=1.0, max_iter=20
+            )
+            # Update landmarks from re-fitted params for consistency
+            landmarks = self.pdm.params_to_landmarks_2d(optimized_params)
 
         # Prepare output info
         info = {
