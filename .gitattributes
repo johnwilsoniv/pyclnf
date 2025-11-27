@@ -1,7 +1,6 @@
-*.npz filter=lfs diff=lfs merge=lfs -text
-*.npy filter=lfs diff=lfs merge=lfs -text
-*.dat filter=lfs diff=lfs merge=lfs -text
 pyclnf/models/exported_inner_ccnf/** filter=lfs diff=lfs merge=lfs -text
 pyclnf/models/exported_inner_pdm/** filter=lfs diff=lfs merge=lfs -text
 pyclnf/models/exported_pdm/** filter=lfs diff=lfs merge=lfs -text
 pyclnf/models/exported_pdm_old/** filter=lfs diff=lfs merge=lfs -text
+*.npz filter=lfs diff=lfs merge=lfs -text
+*.npy filter=lfs diff=lfs merge=lfs -text
