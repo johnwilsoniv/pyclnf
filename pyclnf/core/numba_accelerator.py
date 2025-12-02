@@ -576,7 +576,5 @@ def _warmup_jit():
 # Run warmup on import
 try:
     _warmup_jit()
-    print("CLNF Numba accelerator loaded - targeting 5-10x speedup")
-except Exception as e:
-    print(f"Warning: Numba JIT warmup failed: {e}")
-    print("JIT functions will be compiled on first use (slower first call)")
+except Exception:
+    pass  # JIT functions will be compiled on first use
