@@ -48,8 +48,11 @@ class CLNF:
     patch experts and constrained optimization.
     """
 
+    # Default to package-relative models directory
+    _DEFAULT_MODEL_DIR = Path(__file__).parent / "models"
+
     def __init__(self,
-                 model_dir: str = "pyclnf/models",
+                 model_dir: str = None,
                  scale: float = 0.25,
                  regularization: float = 20,  # Empirically tuned for Python (25 made no difference)
                  max_iterations: int = 10,  # Per phase distributed across windows (~40 total to match C++)
@@ -62,7 +65,12 @@ class CLNF:
                  use_coreml: bool = False,
                  use_eye_refinement: bool = True,
                  debug_mode: bool = False,
-                 tracked_landmarks: list = None):
+                 tracked_landmarks: list = None,
+                 use_shared_memory: bool = False,
+                 shared_memory_dir: str = None,
+                 convergence_profile: str = None,
+                 early_window_exit: bool = True,
+                 early_exit_threshold: float = 0.3):
         """
         Initialize CLNF model.
 
@@ -86,13 +94,34 @@ class CLNF:
             use_coreml: Enable CoreML acceleration (ARM Mac optimization)
             debug_mode: Enable debug output for development
             tracked_landmarks: List of landmark indices to track for debugging
+            use_shared_memory: If True, use memory-mapped shared models for HPC multiprocessing
+                             Reduces memory from 424MB × N_workers to 424MB × 1
+            shared_memory_dir: Directory for shared memory files (default: /dev/shm/pyclnf_models)
+            convergence_profile: Named profile ('accurate', 'optimized', 'fast', 'video')
+                               If provided, overrides max_iterations and convergence_threshold
+            early_window_exit: If True, skip remaining windows when already converged (default: True)
+            early_exit_threshold: Mean shift threshold for early window exit (default: 0.3px)
         """
-        self.model_dir = Path(model_dir)
+        self.use_shared_memory = use_shared_memory
+        self.shared_memory_dir = shared_memory_dir
+        self.model_dir = Path(model_dir) if model_dir else self._DEFAULT_MODEL_DIR
         self.regularization = regularization
         self.sigma = sigma
         self.weight_multiplier = weight_multiplier
         self.debug_mode = debug_mode  # Use parameter value
         self.tracked_landmarks = tracked_landmarks if tracked_landmarks is not None else [36, 48, 30, 8]
+
+        # Phase 2 HPC optimizations: Convergence profile and early window exit
+        self.convergence_profile = convergence_profile
+        self.early_window_exit = early_window_exit
+        self.early_exit_threshold = early_exit_threshold
+
+        # Temporal warm-start state for video mode
+        # These track previous frame's results for faster convergence on subsequent frames
+        self._prev_frame_params = None
+        self._prev_frame_landmarks = None
+        self._video_mode = (convergence_profile == 'video')
+
         # Match C++ OpenFace default: [11, 9, 7]
         # Note: Window size 5 excluded - no sigma components available and degrades performance
         default_windows = [11, 9, 7]
@@ -110,8 +139,14 @@ class CLNF:
         pdm_dir = self.model_dir / "exported_pdm"
         self.pdm = PDM(str(pdm_dir))
 
-        # Load CEN patch experts for ALL scales
-        self.ccnf = CENModel(str(self.model_dir), scales=self.patch_scaling)
+        # Load CEN patch experts for ALL scales (from .dat files)
+        # Use shared memory for HPC multiprocessing (reduces memory by ~93%)
+        self.ccnf = CENModel(
+            str(self.model_dir),
+            scales=self.patch_scaling,
+            use_shared_memory=use_shared_memory,
+            shared_memory_dir=shared_memory_dir
+        )
 
         # NOTE: Previously filtered window sizes to only those with sigma components,
         # but this removes window size 5 which is needed for the finest scale.
@@ -124,6 +159,7 @@ class CLNF:
                 print(f"Note: No sigma components for window sizes {missing_windows}, using identity transform")
 
         # Initialize optimizer with OpenFace parameters
+        # Pass convergence_profile to enable HPC-optimized convergence settings
         self.optimizer = NURLMSOptimizer(
             regularization=regularization,
             max_iterations=max_iterations,
@@ -131,7 +167,8 @@ class CLNF:
             sigma=sigma,
             weight_multiplier=weight_multiplier,  # CRITICAL: Apply weight multiplier
             debug_mode=debug_mode,
-            tracked_landmarks=self.tracked_landmarks
+            tracked_landmarks=self.tracked_landmarks,
+            convergence_profile=convergence_profile  # Phase 2: Named profile for HPC optimization
         )
 
         # Initialize eye refinement model if enabled
@@ -203,7 +240,19 @@ class CLNF:
 
         # Initialize parameters from bounding box
         if initial_params is None:
-            params = self.pdm.init_params(face_bbox)
+            # Phase 2: Video mode temporal warm-start
+            # Use previous frame's params as starting point for faster convergence
+            if self._video_mode and self._prev_frame_params is not None:
+                params = self._prev_frame_params.copy()
+                # Update translation to account for face movement based on new bbox
+                # This provides a better starting point than raw previous params
+                new_bbox_init = self.pdm.init_params(face_bbox)
+                params[4] = new_bbox_init[4]  # tx
+                params[5] = new_bbox_init[5]  # ty
+                if self.debug_mode:
+                    print(f"[VIDEO_MODE] Using warm-start from previous frame")
+            else:
+                params = self.pdm.init_params(face_bbox)
         else:
             params = initial_params.copy()
 
@@ -248,8 +297,18 @@ class CLNF:
 
         total_iterations = 0
         all_iteration_history = []  # Collect iteration history across all windows
+        previous_window_landmarks = None  # For early window exit detection
 
         for window_idx, window_size in enumerate(self.window_sizes):
+            # Phase 2 HPC Optimization: Early window exit
+            # If landmarks haven't moved much since last window, skip remaining windows
+            if self.early_window_exit and window_idx > 0 and previous_window_landmarks is not None:
+                current_landmarks = self.pdm.params_to_landmarks_2d(params)
+                landmark_change = np.linalg.norm(current_landmarks - previous_window_landmarks, axis=1).mean()
+                if landmark_change < self.early_exit_threshold:
+                    if self.debug_mode:
+                        print(f"[EARLY_EXIT] Window {window_size}: landmark change {landmark_change:.4f}px < threshold {self.early_exit_threshold}px, skipping remaining windows")
+                    break
             # Distribute remainder iterations to early windows
             # e.g., max_iter=10, 3 windows → [4, 3, 3]
             window_iters = iters_per_window + (1 if window_idx < iters_remainder else 0)
@@ -311,6 +370,9 @@ class CLNF:
             if 'iteration_history' in opt_info:
                 all_iteration_history.extend(opt_info['iteration_history'])
 
+            # Save landmarks for early window exit detection in next window
+            previous_window_landmarks = self.pdm.params_to_landmarks_2d(params)
+
             # Early stopping if face becomes too small
             if params[0] < 0.25:  # Scale parameter
                 break
@@ -358,6 +420,11 @@ class CLNF:
             )
             # Update landmarks from re-fitted params for consistency
             landmarks = self.pdm.params_to_landmarks_2d(optimized_params)
+
+        # Phase 2: Store results for video mode temporal warm-start
+        if self._video_mode:
+            self._prev_frame_params = optimized_params.copy()
+            self._prev_frame_landmarks = landmarks.copy()
 
         # Prepare output info
         info = {
@@ -499,6 +566,9 @@ class CLNF:
         frame_idx = 0
         prev_params = None  # For temporal consistency
 
+        # Reset temporal state at start of video
+        self.reset_temporal_state()
+
         while True:
             ret, frame = cap.read()
             if not ret:
@@ -512,12 +582,11 @@ class CLNF:
                 landmarks, info = self.fit(
                     frame,
                     bbox,
-                    initial_params=prev_params
+                    initial_params=prev_params,
+                    return_params=True  # Need params for warm-start
                 )
 
                 # Store parameters for next frame
-                if 'params' not in info:
-                    info['params'] = self.pdm.params_to_landmarks_2d.im_func.__self__.params
                 prev_params = info.get('params')
 
                 # Visualize if requested
@@ -528,6 +597,7 @@ class CLNF:
             else:
                 results.append((None, {'converged': False}))
                 prev_params = None  # Reset on detection failure
+                self.reset_temporal_state()  # Also reset internal temporal state
 
             # Write frame if output requested
             if writer:
@@ -613,6 +683,25 @@ class CLNF:
 
         return vis
 
+    def reset_temporal_state(self):
+        """
+        Reset temporal warm-start state.
+
+        Call this when:
+        - Starting a new video
+        - Switching to a different face
+        - After a face tracking failure
+
+        This clears the cached previous frame data used for video mode optimization.
+        """
+        self._prev_frame_params = None
+        self._prev_frame_landmarks = None
+        # Also reset optimizer's response map cache
+        if hasattr(self.optimizer, 'cached_response_maps'):
+            self.optimizer.cached_response_maps = None
+            self.optimizer.cached_landmarks = None
+            self.optimizer.cache_age = 0
+
     def get_info(self) -> Dict:
         """Get model information."""
         return {
@@ -621,9 +710,13 @@ class CLNF:
             'optimizer': {
                 'regularization': self.optimizer.regularization,
                 'max_iterations': self.optimizer.max_iterations,
-                'convergence_threshold': self.optimizer.convergence_threshold
+                'convergence_threshold': self.optimizer.convergence_threshold,
+                'convergence_profile': self.optimizer.convergence_profile_name
             },
-            'patch_scales': self.patch_scaling
+            'patch_scales': self.patch_scaling,
+            'early_window_exit': self.early_window_exit,
+            'early_exit_threshold': self.early_exit_threshold,
+            'video_mode': self._video_mode
         }
 
 

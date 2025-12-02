@@ -294,19 +294,31 @@ class CENModel:
     Provides scale_models dict structure expected by clnf.py.
     """
 
-    def __init__(self, model_base_dir: str, scales: List[float] = None):
+    def __init__(self, model_base_dir: str, scales: List[float] = None,
+                 use_shared_memory: bool = False, shared_memory_dir: str = None):
         """
         Load CEN patch experts and wrap in CCNFModel-compatible interface.
 
         Args:
             model_base_dir: Base directory containing patch_experts/ folder with .dat files
             scales: List of scales to load (default: [0.25, 0.35, 0.5])
+            use_shared_memory: If True, use memory-mapped shared models for HPC
+            shared_memory_dir: Directory for shared memory files (default: /dev/shm/pyclnf_models)
         """
         self.model_base_dir = Path(model_base_dir)
         self.scales = scales or [0.25, 0.35, 0.5]
+        self.use_shared_memory = use_shared_memory
 
-        # Load CEN patch experts
-        self.cen_experts = CENPatchExperts(model_base_dir)
+        # Load CEN patch experts (regular or shared memory)
+        if use_shared_memory:
+            from .shared_model_loader import get_cen_patch_experts
+            self.cen_experts = get_cen_patch_experts(
+                model_base_dir,
+                shm_dir=shared_memory_dir,
+                use_shared=True
+            )
+        else:
+            self.cen_experts = CENPatchExperts(model_base_dir)
 
         # Load sigma components for response normalization
         # (Both CEN and CCNF use sigma components in OpenFace)
