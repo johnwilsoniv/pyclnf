@@ -54,9 +54,9 @@ class CLNF:
     def __init__(self,
                  model_dir: str = None,
                  scale: float = 0.25,
-                 regularization: float = 20,  # Empirically tuned for Python (25 made no difference)
+                 regularization: float = 35,  # C++ OpenFace default reg_factor=35
                  max_iterations: int = 10,  # Per phase distributed across windows (~40 total to match C++)
-                 convergence_threshold: float = 0.1,  # Early stopping: stop when mean landmark change < 0.1px
+                 convergence_threshold: float = 0.005,  # Gold standard: strict convergence for accuracy
                  sigma: float = 1.5,  # KDE kernel sigma - matches C++ default
                  weight_multiplier: float = 0.0,  # Disabled - hurts face model (tested: 2.0, 5.0 both worse)
                  window_sizes: list = None,
@@ -69,7 +69,7 @@ class CLNF:
                  use_shared_memory: bool = False,
                  shared_memory_dir: str = None,
                  convergence_profile: str = None,
-                 early_window_exit: bool = True,
+                 early_window_exit: bool = False,
                  early_exit_threshold: float = 0.3):
         """
         Initialize CLNF model.
@@ -78,11 +78,11 @@ class CLNF:
             model_dir: Directory containing exported PDM and CCNF models
             scale: DEPRECATED - now loads all scales [0.25, 0.35, 0.5]
             regularization: Shape regularization weight (higher = stricter shape prior)
-                          Default: 20 (tested: 25 made no difference, weight_multiplier=5 hurt)
+                          Default: 35 (matches C++ OpenFace reg_factor)
             max_iterations: Maximum optimization iterations TOTAL across all window sizes
                           (OpenFace default: 5 per window × 4 windows = 20 total)
             convergence_threshold: Mean per-landmark convergence threshold in pixels
-                          (default: 0.1 pixels mean change for early convergence)
+                          (default: 0.005 pixels for gold standard accuracy)
             sigma: Gaussian kernel sigma for KDE mean-shift
                   (OpenFace uses σ=1.5 for Multi-PIE, σ=2.0 for in-the-wild)
             weight_multiplier: Weight multiplier w for patch confidences
