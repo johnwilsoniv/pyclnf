@@ -172,22 +172,29 @@ class NURLMSOptimizer:
     """
 
     def __init__(self,
-                 regularization: float = 25.0,  # C++ default (was 1.0)
+                 regularization: float = 22.5,  # C++ CECLM: 25.0 base × 0.9 = 22.5
                  max_iterations: int = 10,
-                 convergence_threshold: float = 0.01,
-                 sigma: float = 1.5,  # C++ default (was 1.75)
-                 weight_multiplier: float = 0.0,  # C++ video mode default (was 5.0)
+                 convergence_threshold: float = 0.005,  # Gold standard (stricter than 0.01)
+                 sigma: float = 2.25,  # C++ CECLM: 1.5 base × 1.5 = 2.25
+                 weight_multiplier: float = 0.0,  # C++ video mode (disabled)
                  debug_mode: bool = False,
                  tracked_landmarks: list = None,
                  convergence_profile: str = None):
         """
         Initialize NU-RLMS optimizer.
 
+        Note: Defaults match C++ OpenFace CECLM model (main_ceclm_general.txt):
+            - regularization: 25.0 base × 0.9 = 22.5
+            - sigma: 1.5 base × 1.5 = 2.25
+
         Args:
             regularization: Regularization weight λ (higher = stronger shape prior)
+                          Default: 22.5 (C++ CECLM)
             max_iterations: Maximum optimization iterations (overridden by profile)
-            convergence_threshold: Convergence threshold for parameter change (overridden by profile)
-            sigma: Gaussian kernel sigma for KDE mean-shift (C++ default: 1.5)
+            convergence_threshold: Convergence threshold in pixels (overridden by profile)
+                          Default: 0.005 (gold standard for sub-pixel accuracy)
+            sigma: Gaussian kernel sigma for KDE mean-shift
+                  Default: 2.25 (C++ CECLM: 1.5 × 1.5)
             weight_multiplier: Weight multiplier w for patch confidences
                              C++ video mode uses w=0 (disabled), wild mode uses w=2.5
                              Controls how much to trust patch responses vs shape prior
