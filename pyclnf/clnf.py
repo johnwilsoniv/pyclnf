@@ -57,7 +57,7 @@ class CLNF:
                  regularization: float = 35,  # C++ OpenFace default reg_factor=35
                  max_iterations: int = 10,  # Per phase distributed across windows (~40 total to match C++)
                  convergence_threshold: float = 0.005,  # Gold standard: strict convergence for accuracy
-                 sigma: float = 1.5,  # KDE kernel sigma - matches C++ default
+                 sigma: float = 2.25,  # KDE kernel sigma - matches C++ CECLM (1.5 * 1.5)
                  weight_multiplier: float = 0.0,  # Disabled - hurts face model (tested: 2.0, 5.0 both worse)
                  window_sizes: list = None,
                  detector: str = "pymtcnn",
@@ -84,7 +84,7 @@ class CLNF:
             convergence_threshold: Mean per-landmark convergence threshold in pixels
                           (default: 0.005 pixels for gold standard accuracy)
             sigma: Gaussian kernel sigma for KDE mean-shift
-                  (OpenFace uses σ=1.5 for Multi-PIE, σ=2.0 for in-the-wild)
+                  (OpenFace CEN/CECLM uses σ=2.25 = 1.5 base × 1.5 CECLM multiplier)
             weight_multiplier: Weight multiplier w for patch confidences
                              (OpenFace uses w=7 for Multi-PIE, w=5 for in-the-wild)
             window_sizes: List of window sizes for hierarchical refinement (default: [11, 9, 7])
@@ -122,8 +122,28 @@ class CLNF:
         self._prev_frame_landmarks = None
         self._video_mode = (convergence_profile == 'video')
 
-        # Match C++ OpenFace default: [11, 9, 7]
-        # Note: Window size 5 excluded - no sigma components available and degrades performance
+        # Video-mode template tracking (matches C++ OpenFace)
+        # Template matching corrects global parameters before optimization
+        # This significantly improves left jaw landmark accuracy in video mode
+        self._face_template = None  # Stored face template from previous successful frame
+        self._template_init_box = None  # Bounding box when template was extracted (x_min, y_min, w, h)
+        self._template_face_offset = None  # Offset of face bbox within template (dx, dy)
+        self._template_scale = 0.5  # Scale factor for template (C++ default: face_template_scale/params_global[0])
+        self._use_template_tracking = self._video_mode  # Enable by default in video mode
+        self._tracking_initialized = False  # Whether tracking has been initialized
+        self._failures_in_a_row = 0  # Count of consecutive tracking failures
+
+        # Adaptive window sizes for video mode (matches C++ OpenFace)
+        # After first frame, use smaller search windows for faster tracking
+        # C++ window_sizes_small = [0, 9, 7, 0] - 0 means skip that scale
+        # C++ window_sizes_init = [11, 9, 7, 5] - includes all scales for first detection
+        # However, without sigma_components for WS5, adding it degrades accuracy.
+        self._window_sizes_init = [11, 9, 7]  # First detection - skip WS5 (no sigma_components)
+        self._window_sizes_tracking = [9, 7]  # Subsequent tracking (skip coarsest/finest scales)
+
+        # Match C++ OpenFace window sizes but EXCLUDE window size 5
+        # Testing showed WS5 degrades accuracy without sigma_components (0.846px -> 0.955px)
+        # The sigma_components files only exist for window sizes [7, 9, 11, 15], not 5.
         default_windows = [11, 9, 7]
         self.window_sizes = window_sizes if window_sizes is not None else default_windows
 
@@ -283,12 +303,25 @@ class CLNF:
         view_idx = 0
         pose = np.array([0.0, 0.0, 0.0])  # [pitch, yaw, roll]
 
+        # Video mode: Apply template matching correction before optimization
+        # This helps stabilize outer landmarks where patch responses are ambiguous
+        if self._use_template_tracking and self._tracking_initialized:
+            params = self._correct_global_parameters_video(gray, params)
+
+        # Video mode: Use adaptive window sizes after first frame
+        # C++ uses window_sizes_small = [0, 9, 7, 0] for tracking (0 = skip)
+        active_window_sizes = self.window_sizes
+        if self._tracking_initialized and self._video_mode:
+            active_window_sizes = self._window_sizes_tracking
+            if self.debug_mode:
+                print(f"[VIDEO_MODE] Using tracking windows: {active_window_sizes}")
+
         # Hierarchical optimization with multiple window sizes and patch scales
         # OpenFace optimizes from large to small windows for coarse-to-fine refinement
 
         # FIX: Distribute max_iterations across window sizes instead of per-window
         # This ensures total iterations match max_iterations, not max_iterations × num_windows
-        n_windows = len(self.window_sizes)
+        n_windows = len(active_window_sizes)
         iters_per_window = self.optimizer.max_iterations // n_windows
         iters_remainder = self.optimizer.max_iterations % n_windows
 
@@ -299,7 +332,7 @@ class CLNF:
         all_iteration_history = []  # Collect iteration history across all windows
         previous_window_landmarks = None  # For early window exit detection
 
-        for window_idx, window_size in enumerate(self.window_sizes):
+        for window_idx, window_size in enumerate(active_window_sizes):
             # Phase 2 HPC Optimization: Early window exit
             # If landmarks haven't moved much since last window, skip remaining windows
             if self.early_window_exit and window_idx > 0 and previous_window_landmarks is not None:
@@ -425,6 +458,15 @@ class CLNF:
         if self._video_mode:
             self._prev_frame_params = optimized_params.copy()
             self._prev_frame_landmarks = landmarks.copy()
+
+        # Video mode: Update face template after successful optimization
+        # This template is used for template matching correction in subsequent frames
+        if self._use_template_tracking:
+            self._update_face_template(gray, optimized_params)
+            if not self._tracking_initialized:
+                self._tracking_initialized = True
+                if self.debug_mode:
+                    print(f"[VIDEO_MODE] Tracking initialized, will use template matching on next frame")
 
         # Prepare output info
         info = {
@@ -619,19 +661,22 @@ class CLNF:
         - window_sizes[0] → scale 0 (0.25)
         - window_sizes[1] → scale 1 (0.35)
         - window_sizes[2] → scale 2 (0.5)
+        - window_sizes[3] → scale 3 (1.0)
 
-        Default: [11, 9, 7, 5] means ws=11 uses scale 0.25, ws=9 uses 0.35, etc.
+        Window size 11 → 0.25, 9 → 0.35, 7 → 0.5, 5 → 1.0
+        This mapping is independent of which windows are active (init vs tracking mode).
 
         Returns:
             Dictionary mapping window_size -> scale_index
         """
-        mapping = {}
-        for i, window_size in enumerate(self.window_sizes):
-            # Match C++ convention: array position = scale index
-            # Clamp to available scales
-            scale_idx = min(i, len(self.patch_scaling) - 1)
-            mapping[window_size] = scale_idx
-        return mapping
+        # Fixed mapping based on C++ convention: larger windows → coarser scales
+        window_scale_map = {
+            11: 0,  # 0.25 scale
+            9: 1,   # 0.35 scale
+            7: 2,   # 0.5 scale
+            5: 3,   # 1.0 scale
+        }
+        return window_scale_map
 
     def _get_patch_experts(self, view_idx: int, scale: float) -> Dict[int, 'CCNFPatchExpert']:
         """
@@ -683,6 +728,155 @@ class CLNF:
 
         return vis
 
+    def _correct_global_parameters_video(self,
+                                         gray: np.ndarray,
+                                         params: np.ndarray) -> np.ndarray:
+        """
+        Correct global parameters using template matching (matches C++ CorrectGlobalParametersVideo).
+
+        This method uses the stored face template from the previous frame to find
+        the best translation correction via template matching. This helps stabilize
+        tracking when local patch responses are ambiguous (e.g., outer jaw landmarks).
+
+        Args:
+            gray: Grayscale image
+            params: Current PDM parameters [scale, rot_x, rot_y, rot_z, tx, ty, local...]
+
+        Returns:
+            params: Updated parameters with corrected translation
+        """
+        if self._face_template is None or self._template_init_box is None:
+            return params
+        if self._template_face_offset is None:
+            return params
+
+        # Get current bounding box from PDM (init_box in C++)
+        landmarks = self.pdm.params_to_landmarks_2d(params)
+        x_min, y_min = landmarks.min(axis=0)
+        x_max, y_max = landmarks.max(axis=0)
+        width = x_max - x_min
+        height = y_max - y_min
+
+        # init_box is the bounding box from current params (where we expect face to be)
+        init_box_x = x_min
+        init_box_y = y_min
+
+        # Create ROI (2x bbox size centered on init_box, like C++)
+        roi_x = int(max(0, x_min - width / 2))
+        roi_y = int(max(0, y_min - height / 2))
+        roi_w = int(min(gray.shape[1] - roi_x, width * 2))
+        roi_h = int(min(gray.shape[0] - roi_y, height * 2))
+
+        if roi_w < self._face_template.shape[1] or roi_h < self._face_template.shape[0]:
+            return params  # ROI too small for template matching
+
+        roi = gray[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w]
+
+        # Scale template and ROI if needed (like C++)
+        scaling = self._template_scale / params[0]
+        if scaling < 1:
+            template = cv2.resize(self._face_template, None, fx=scaling, fy=scaling)
+            roi_scaled = cv2.resize(roi, None, fx=scaling, fy=scaling)
+            # Scale the face offset too
+            face_offset_x = self._template_face_offset[0] * scaling
+            face_offset_y = self._template_face_offset[1] * scaling
+        else:
+            scaling = 1.0
+            template = self._face_template
+            roi_scaled = roi
+            face_offset_x = self._template_face_offset[0]
+            face_offset_y = self._template_face_offset[1]
+
+        if template.shape[0] > roi_scaled.shape[0] or template.shape[1] > roi_scaled.shape[1]:
+            return params  # Template larger than ROI
+
+        # Template matching
+        try:
+            corr_out = cv2.matchTemplate(roi_scaled, template, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(corr_out)
+
+            # Only apply shift if correlation is strong enough
+            # C++ OpenFace doesn't have a threshold, but we keep a very low one for safety
+            # Lowered from 0.5 to 0.2 to match C++ behavior more closely
+            if max_val < 0.2:
+                if self.debug_mode:
+                    print(f"[TEMPLATE_MATCH] Very low correlation ({max_val:.3f}), skipping")
+                return params
+
+            # max_loc is where the template top-left corner was found (in scaled ROI coords)
+            # Convert to image coordinates
+            template_found_x = max_loc[0] / scaling + roi_x
+            template_found_y = max_loc[1] / scaling + roi_y
+
+            # The face bbox is offset within the template by _template_face_offset
+            # So actual face position = template position + face offset (unscaled)
+            face_found_x = template_found_x + self._template_face_offset[0]
+            face_found_y = template_found_y + self._template_face_offset[1]
+
+            # Shift is where face was found vs where we expected it (init_box)
+            shift_x = face_found_x - init_box_x
+            shift_y = face_found_y - init_box_y
+
+            # Clamp shift to reasonable values (max 1/4 of face width)
+            max_shift = max(width, height) / 4
+            shift_x = np.clip(shift_x, -max_shift, max_shift)
+            shift_y = np.clip(shift_y, -max_shift, max_shift)
+
+            # Apply shift to translation parameters
+            params = params.copy()
+            params[4] += shift_x  # tx
+            params[5] += shift_y  # ty
+
+            if self.debug_mode:
+                print(f"[TEMPLATE_MATCH] corr={max_val:.3f}, Shift: ({shift_x:.2f}, {shift_y:.2f}) pixels")
+
+        except cv2.error as e:
+            if self.debug_mode:
+                print(f"[TEMPLATE_MATCH] Template matching failed: {e}")
+
+        return params
+
+    def _update_face_template(self, gray: np.ndarray, params: np.ndarray):
+        """
+        Update face template after successful detection (matches C++ UpdateTemplate).
+
+        Extracts a face template from the current frame using the fitted landmarks.
+        This template is used for template matching correction in subsequent frames.
+
+        Args:
+            gray: Grayscale image
+            params: Fitted PDM parameters
+        """
+        landmarks = self.pdm.params_to_landmarks_2d(params)
+
+        # Get bounding box from landmarks (this is init_box in C++)
+        x_min, y_min = landmarks.min(axis=0)
+        x_max, y_max = landmarks.max(axis=0)
+        width = x_max - x_min
+        height = y_max - y_min
+
+        # Store the init_box for next frame's template matching
+        self._template_init_box = (x_min, y_min, width, height)
+
+        # Extract face region with some padding (like C++ UpdateTemplate)
+        padding = 0.1
+        x1 = int(max(0, x_min - width * padding))
+        y1 = int(max(0, y_min - height * padding))
+        x2 = int(min(gray.shape[1], x_max + width * padding))
+        y2 = int(min(gray.shape[0], y_max + height * padding))
+
+        if x2 > x1 and y2 > y1:
+            self._face_template = gray[y1:y2, x1:x2].copy()
+            self._template_scale = params[0]  # Store current scale
+
+            # Store the offset of face bbox within the template region
+            # This is needed to correctly compute shift when template matching
+            self._template_face_offset = (x_min - x1, y_min - y1)
+
+            if self.debug_mode:
+                print(f"[TEMPLATE_UPDATE] Template size: {self._face_template.shape}")
+                print(f"[TEMPLATE_UPDATE] Face offset in template: {self._template_face_offset}")
+
     def reset_temporal_state(self):
         """
         Reset temporal warm-start state.
@@ -696,6 +890,12 @@ class CLNF:
         """
         self._prev_frame_params = None
         self._prev_frame_landmarks = None
+        # Reset template tracking state
+        self._face_template = None
+        self._template_init_box = None
+        self._template_face_offset = None
+        self._tracking_initialized = False
+        self._failures_in_a_row = 0
         # Also reset optimizer's response map cache
         if hasattr(self.optimizer, 'cached_response_maps'):
             self.optimizer.cached_response_maps = None

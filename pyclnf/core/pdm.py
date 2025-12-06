@@ -771,8 +771,9 @@ class PDM:
             JtJ = J.T @ J
 
             # Add regularization for shape parameters (indices 6+)
+            # C++ uses no epsilon: reg_factor / eigen_values
             reg_diag = np.zeros(self.n_params)
-            reg_diag[6:] = reg_factor / (self.eigen_values.flatten() + 1e-10)
+            reg_diag[6:] = reg_factor / self.eigen_values.flatten()
             H = JtJ + np.diag(reg_diag)
 
             # Solve for parameter update: delta = H^(-1) J^T residual
