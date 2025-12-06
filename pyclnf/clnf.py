@@ -54,7 +54,7 @@ class CLNF:
     def __init__(self,
                  model_dir: str = None,
                  scale: float = 0.25,
-                 regularization: float = 35,  # C++ OpenFace default reg_factor=35
+                 regularization: float = 22.5,  # C++ CECLM: 25.0 base × 0.9 = 22.5
                  max_iterations: int = 10,  # Per phase distributed across windows (~40 total to match C++)
                  convergence_threshold: float = 0.005,  # Gold standard: strict convergence for accuracy
                  sigma: float = 2.25,  # KDE kernel sigma - matches C++ CECLM (1.5 * 1.5)
@@ -78,7 +78,7 @@ class CLNF:
             model_dir: Directory containing exported PDM and CCNF models
             scale: DEPRECATED - now loads all scales [0.25, 0.35, 0.5]
             regularization: Shape regularization weight (higher = stricter shape prior)
-                          Default: 35 (matches C++ OpenFace reg_factor)
+                          Default: 22.5 (C++ CECLM: 25.0 base × 0.9 scaling)
             max_iterations: Maximum optimization iterations TOTAL across all window sizes
                           (OpenFace default: 5 per window × 4 windows = 20 total)
             convergence_threshold: Mean per-landmark convergence threshold in pixels
