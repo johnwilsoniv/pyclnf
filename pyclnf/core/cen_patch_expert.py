@@ -191,7 +191,8 @@ class CENPatchExpert:
 
             # Apply activation function
             if self.activation_function[i] == 0:
-                # Sigmoid (clamp extreme values to prevent overflow)
+                # Sigmoid with numerical stability clamping
+                # Prevents overflow in exp(-x) for large positive x
                 layer_output = np.clip(layer_output, -88, 88)
                 layer_output = 1.0 / (1.0 + np.exp(-layer_output))
             elif self.activation_function[i] == 1:
@@ -212,6 +213,119 @@ class CENPatchExpert:
         response = layer_output_flat.reshape(response_height, response_width, order='F')
 
         return response.astype(np.float32)
+
+    def response_sparse(self, area_of_interest_left, area_of_interest_right):
+        """
+        Compute response maps for both left and right landmarks together.
+
+        Matches C++ CEN_patch_expert::ResponseSparse() exactly:
+        1. Flip right AOI horizontally
+        2. im2col both AOIs
+        3. Concatenate and process through neural network together
+        4. Split results and flip right response back
+
+        This is how C++ processes frontal faces - both symmetric landmarks
+        are computed together in a single neural network pass.
+
+        Args:
+            area_of_interest_left: Left landmark's AOI (H, W) or None
+            area_of_interest_right: Right landmark's AOI (H, W) or None
+
+        Returns:
+            response_left: Left response map (or None if left not provided)
+            response_right: Right response map (or None if right not provided)
+        """
+        if self.is_empty:
+            # Return zero responses for empty expert
+            response_left = None
+            response_right = None
+            if area_of_interest_left is not None:
+                h = area_of_interest_left.shape[0] - self.height_support + 1
+                w = area_of_interest_left.shape[1] - self.width_support + 1
+                response_left = np.zeros((h, w), dtype=np.float32)
+            if area_of_interest_right is not None:
+                h = area_of_interest_right.shape[0] - self.height_support + 1
+                w = area_of_interest_right.shape[1] - self.width_support + 1
+                response_right = np.zeros((h, w), dtype=np.float32)
+            return response_left, response_right
+
+        left_provided = area_of_interest_left is not None
+        right_provided = area_of_interest_right is not None
+
+        response_height = 0
+        im2col_left = None
+        im2col_right = None
+
+        # Process right AOI: flip horizontally BEFORE im2col (like C++ line 555)
+        if right_provided:
+            aoi_right_flipped = cv2.flip(area_of_interest_right.astype(np.float32), 1)
+            response_height = aoi_right_flipped.shape[0] - self.height_support + 1
+            im2col_right = im2col_bias(aoi_right_flipped, self.width_support, self.height_support)
+            im2col_right = contrast_norm(im2col_right)
+
+        # Process left AOI (no flip)
+        if left_provided:
+            response_height = area_of_interest_left.shape[0] - self.height_support + 1
+            im2col_left = im2col_bias(area_of_interest_left, self.width_support, self.height_support)
+            im2col_left = contrast_norm(im2col_left)
+
+        # Concatenate and process together (like C++ line 570)
+        # C++ im2col_prealloc shape: (num_features=122, num_patches=121)
+        # Python im2col_bias shape: (num_patches=121, num_features=122)
+        # C++ does vconcat then transpose - we need to match this
+        if left_provided and right_provided:
+            # Concatenate along the patch dimension (axis 0), then transpose
+            # C++ vconcat: (122, 121) + (122, 121) -> (122, 242)
+            # C++ .t(): (122, 242) -> (242, 122)
+            # Our shape: (121, 122) + (121, 122) -> (242, 122) [after vstack]
+            combined = np.vstack([im2col_left, im2col_right])
+            # No transpose needed - our shape is already (num_patches*2, num_features)
+        elif left_provided:
+            combined = im2col_left
+        elif right_provided:
+            combined = im2col_right
+        else:
+            return None, None
+
+        # Forward pass through neural network (ResponseInternal)
+        layer_output = combined
+        for i in range(len(self.weights)):
+            layer_output = layer_output @ self.weights[i].T + self.biases[i]
+
+            if self.activation_function[i] == 0:
+                layer_output = np.clip(layer_output, -88, 88)
+                layer_output = 1.0 / (1.0 + np.exp(-layer_output))
+            elif self.activation_function[i] == 1:
+                layer_output = np.tanh(layer_output)
+            elif self.activation_function[i] == 2:
+                layer_output = np.maximum(0, layer_output)
+
+        # Split results (like C++ lines 584-596)
+        response_left = None
+        response_right = None
+        response_width = response_height  # Square response for CEN
+        num_patches = response_height * response_width
+
+        if left_provided and right_provided:
+            # Split in half (first half = left, second half = right)
+            resp_left_flat = layer_output[:num_patches].flatten()
+            resp_right_flat = layer_output[num_patches:].flatten()
+
+            response_left = resp_left_flat.reshape(response_height, response_width, order='F')
+            response_right = resp_right_flat.reshape(response_height, response_width, order='F')
+        elif left_provided:
+            resp_flat = layer_output.flatten()
+            response_left = resp_flat.reshape(response_height, response_width, order='F')
+        elif right_provided:
+            resp_flat = layer_output.flatten()
+            response_right = resp_flat.reshape(response_height, response_width, order='F')
+
+        # Flip right response back (like C++ line 615)
+        if response_right is not None:
+            response_right = cv2.flip(response_right, 1)
+
+        return response_left.astype(np.float32) if response_left is not None else None, \
+               response_right.astype(np.float32) if response_right is not None else None
 
 
 class MirroredCENPatchExpert:
@@ -606,7 +720,7 @@ def _contrast_norm_numba(input_patch, output):
             sum_sq += diff * diff
 
         norm = np.sqrt(sum_sq)  # L2 norm, no division by n
-        if norm < 1e-10:
+        if norm == 0:  # C++ uses exact 0 comparison
             norm = 1.0
 
         # Normalize (skip first column which is bias)
@@ -745,7 +859,7 @@ def _response_core_numba(input_patch, width, height,
                 sum_sq += diff * diff
 
             norm = np.sqrt(sum_sq)
-            if norm < 1e-10:
+            if norm == 0:  # C++ uses exact 0 comparison
                 norm = 1.0
 
             # Third pass: normalize
@@ -842,7 +956,7 @@ def contrast_norm(input_patch):
             sum_sq = np.sum((row - mean) ** 2)
             norm = np.sqrt(sum_sq)
 
-            if norm < 1e-10:
+            if norm == 0:  # C++ uses exact 0 comparison
                 norm = 1.0
 
             output[y, 1:] = (row - mean) / norm
