@@ -935,7 +935,10 @@ class HierarchicalEyeModel:
             sim_ref_to_img: 2x2 transformation matrix [scale*cos, -scale*sin; scale*sin, scale*cos]
         """
         # Get reference shape (mean shape)
-        ref_shape = pdm.mean_shape[:pdm.n_points * 2].reshape(pdm.n_points, 2)
+        # CRITICAL FIX: PDM stores as grouped [x0,x1,...,xn, y0,y1,...,yn], NOT interleaved
+        x_coords = pdm.mean_shape[:pdm.n_points]
+        y_coords = pdm.mean_shape[pdm.n_points:pdm.n_points * 2]
+        ref_shape = np.column_stack([x_coords, y_coords])
 
         # Current shape
         curr_shape = eye_landmarks
