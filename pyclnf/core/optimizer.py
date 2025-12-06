@@ -33,6 +33,7 @@ import cv2
 from numba import jit
 
 from .utils import align_shapes_with_scale, apply_similarity_transform, invert_similarity_transform
+from .cen_patch_expert import MirroredCENPatchExpert, CENPatchExpert
 
 # ============================================================================
 # CONVERGENCE PROFILES - Tuned for accuracy vs speed tradeoffs
@@ -96,24 +97,6 @@ def get_convergence_profile(name: str) -> Dict[str, Any]:
         valid = list(CONVERGENCE_PROFILES.keys())
         raise ValueError(f"Unknown convergence profile '{name}'. Valid: {valid}")
     return CONVERGENCE_PROFILES[name].copy()
-
-# OpenFace mirror landmark indices - maps each landmark to its symmetric counterpart
-# Used for dual-patch response computation (extracting from both direct AND mirror locations)
-# This matches OpenFace's mirror_inds in PDM.cpp
-MIRROR_INDS = np.array([
-    16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,  # Jaw (0-16)
-    26, 25, 24, 23, 22, 21, 20, 19, 18, 17,  # Eyebrows (17-26)
-    27, 28, 29, 30,  # Nose bridge (27-30)
-    35, 34, 33, 32, 31,  # Nose base (31-35)
-    45, 44, 43, 42, 41, 40,  # Left eye → Right eye (36-41)
-    39, 38, 37, 36,  # Right eye outer (42-45) → Left eye inner
-    46, 47,  # Nose tips (46-47)
-    54, 53, 52, 51, 50, 49, 48,  # Outer mouth (48-54)
-    59, 58, 57, 56, 55,  # Upper lip outer (55-59)
-    64, 63, 62, 61, 60,  # Lower lip outer (60-64)
-    67, 66, 65  # Inner mouth (65-67)
-], dtype=np.int32)
-
 
 @jit(nopython=True, cache=True)
 def _kde_mean_shift_numba(response_map: np.ndarray,
@@ -189,11 +172,11 @@ class NURLMSOptimizer:
     """
 
     def __init__(self,
-                 regularization: float = 1.0,
+                 regularization: float = 25.0,  # C++ default (was 1.0)
                  max_iterations: int = 10,
                  convergence_threshold: float = 0.01,
-                 sigma: float = 1.75,
-                 weight_multiplier: float = 5.0,
+                 sigma: float = 1.5,  # C++ default (was 1.75)
+                 weight_multiplier: float = 0.0,  # C++ video mode default (was 5.0)
                  debug_mode: bool = False,
                  tracked_landmarks: list = None,
                  convergence_profile: str = None):
@@ -204,9 +187,9 @@ class NURLMSOptimizer:
             regularization: Regularization weight λ (higher = stronger shape prior)
             max_iterations: Maximum optimization iterations (overridden by profile)
             convergence_threshold: Convergence threshold for parameter change (overridden by profile)
-            sigma: Gaussian kernel sigma for KDE mean-shift (OpenFace default: 1.75)
+            sigma: Gaussian kernel sigma for KDE mean-shift (C++ default: 1.5)
             weight_multiplier: Weight multiplier w for patch confidences
-                             (OpenFace uses w=7 for Multi-PIE, w=5 for in-the-wild)
+                             C++ video mode uses w=0 (disabled), wild mode uses w=2.5
                              Controls how much to trust patch responses vs shape prior
             debug_mode: Enable detailed debug output (similar to MTCNN debug mode)
             tracked_landmarks: Landmarks to track in detail when debug_mode=True (default: [36, 48, 30, 8])
@@ -256,6 +239,57 @@ class NURLMSOptimizer:
         self._last_jtw_norm = None
         self._last_reg_term_norm = None
 
+        # Store base parameters for scale-adaptive computation (C++ lines 943-950)
+        # These are adapted based on patch_scaling during optimization
+        self._base_regularization = regularization
+        self._base_sigma = sigma
+        self._base_weight_multiplier = weight_multiplier
+
+        # Enable/disable scale adaptation (matches C++ OpenFace behavior)
+        self.use_scale_adaptation = True
+
+    def _compute_scale_adapted_params(self, patch_scaling: float) -> Tuple[float, float, float]:
+        """
+        Compute scale-adapted optimization parameters matching C++ OpenFace.
+
+        C++ formulas (LandmarkDetectorModel.cpp lines 943-950):
+            reg_factor = reg_factor - 15 * log(patch_scaling/0.25)/log(2)
+            sigma = sigma + 0.25 * log(patch_scaling/0.25)/log(2)
+            weight_factor = weight_factor + 2 * weight_factor * log(patch_scaling/0.25)/log(2)
+
+        Note: C++ limits scale to max of 2 before computing adaptation.
+
+        Args:
+            patch_scaling: Current patch scale (0.25, 0.35, 0.5, etc.)
+
+        Returns:
+            (adapted_reg, adapted_sigma, adapted_weight): Adapted parameters
+        """
+        import math
+
+        if not self.use_scale_adaptation:
+            return self._base_regularization, self._base_sigma, self._base_weight_multiplier
+
+        # Compute log ratio like C++: log(scale/0.25) / log(2)
+        # For scale=0.25: ratio=0, for scale=0.5: ratio=1, for scale=1.0: ratio=2
+        if patch_scaling <= 0.25:
+            log_ratio = 0.0
+        else:
+            log_ratio = math.log(patch_scaling / 0.25) / math.log(2)
+
+        # Adapt regularization: decreases as scale increases
+        adapted_reg = self._base_regularization - 15 * log_ratio
+        if adapted_reg <= 0:
+            adapted_reg = 0.001  # C++ minimum threshold
+
+        # Adapt sigma: increases as scale increases
+        adapted_sigma = self._base_sigma + 0.25 * log_ratio
+
+        # Adapt weight multiplier: increases as scale increases
+        adapted_weight = self._base_weight_multiplier + 2 * self._base_weight_multiplier * log_ratio
+
+        return adapted_reg, adapted_sigma, adapted_weight
+
     def optimize(self,
                  pdm,
                  initial_params: np.ndarray,
@@ -286,6 +320,24 @@ class NURLMSOptimizer:
         n_params = len(params)
         n_landmarks = pdm.n_points
 
+        # =================================================================
+        # SCALE-ADAPTIVE PARAMETERS (C++ LandmarkDetectorModel.cpp:943-950)
+        # =================================================================
+        # Compute adapted regularization, sigma, and weight_multiplier based on patch_scaling
+        adapted_reg, adapted_sigma, adapted_weight = self._compute_scale_adapted_params(patch_scaling)
+
+        # Store adapted values for use in this optimization run
+        # These override base values for the duration of this optimize() call
+        self._current_regularization = adapted_reg
+        self._current_sigma = adapted_sigma
+        self._current_weight_multiplier = adapted_weight
+
+        if self.debug_mode:
+            print(f"\n[PY][SCALE] Scale adaptation at patch_scaling={patch_scaling:.3f}:")
+            print(f"[PY][SCALE]   Base reg={self._base_regularization:.3f} -> Adapted reg={adapted_reg:.3f}")
+            print(f"[PY][SCALE]   Base sigma={self._base_sigma:.3f} -> Adapted sigma={adapted_sigma:.3f}")
+            print(f"[PY][SCALE]   Base weight={self._base_weight_multiplier:.3f} -> Adapted weight={adapted_weight:.3f}")
+
         # Initialize weights (default: uniform)
         if weights is None:
             weights = np.ones(n_landmarks)
@@ -294,9 +346,9 @@ class NURLMSOptimizer:
         # OpenFace behavior (see PDM.cpp line 613 and LandmarkDetectorModel.cpp):
         # - weight_factor > 0: W = weight_factor · diag(patch_confidences)  [NU-RLMS mode]
         # - weight_factor = 0: W = Identity  [Video mode - all landmarks weighted equally]
-        if self.weight_multiplier > 0:
-            # NU-RLMS mode: apply weight multiplier to patch confidences
-            W = self.weight_multiplier * np.diag(np.repeat(weights, 2))
+        if adapted_weight > 0:
+            # NU-RLMS mode: apply adapted weight multiplier to patch confidences
+            W = adapted_weight * np.diag(np.repeat(weights, 2))
         else:
             # Video mode: use identity matrix (all landmarks weighted equally)
             W = np.eye(n_landmarks * 2)
@@ -374,11 +426,13 @@ class NURLMSOptimizer:
 
             # Early stopping: check if landmarks have converged
             # Only check after min_iterations to ensure we've made progress
+            # GOLD STANDARD: Use total norm with fixed 0.01 threshold (matches C++ OpenFace)
             if (rigid_iter >= self.min_iterations and
                 previous_landmarks is not None and
                 self.convergence_threshold > 0):
-                landmark_change = np.linalg.norm(current_landmarks - previous_landmarks, axis=1).mean()
-                if landmark_change < self.convergence_threshold:
+                # Total shape change norm (not per-landmark mean)
+                shape_change = np.linalg.norm(current_landmarks - previous_landmarks)
+                if shape_change < 0.01:  # Fixed threshold matching C++ line 1173
                     rigid_converged = True
                     break
             previous_landmarks = current_landmarks.copy()
@@ -483,11 +537,13 @@ class NURLMSOptimizer:
 
             # Early stopping: check if landmarks have converged
             # Only check after min_iterations to ensure we've made progress
+            # GOLD STANDARD: Use total norm with fixed 0.01 threshold (matches C++ OpenFace)
             if (nonrigid_iter >= self.min_iterations and
                 previous_landmarks is not None and
                 self.convergence_threshold > 0):
-                landmark_change = np.linalg.norm(current_landmarks - previous_landmarks, axis=1).mean()
-                if landmark_change < self.convergence_threshold:
+                # Total shape change norm (not per-landmark mean)
+                shape_change = np.linalg.norm(current_landmarks - previous_landmarks)
+                if shape_change < 0.01:  # Fixed threshold matching C++ line 1173
                     nonrigid_converged = True
                     break
             previous_landmarks = current_landmarks.copy()
@@ -623,6 +679,97 @@ class NURLMSOptimizer:
 
         return max_displacement < self.response_reuse_threshold
 
+    def _extract_area_of_interest(self,
+                                   image: np.ndarray,
+                                   center_x: float,
+                                   center_y: float,
+                                   patch_expert,
+                                   window_size: int,
+                                   sim_img_to_ref: np.ndarray = None,
+                                   sim_ref_to_img: np.ndarray = None) -> Optional[np.ndarray]:
+        """
+        Extract the area of interest around a landmark for patch expert evaluation.
+
+        This extracts the warped region around the landmark that will be processed
+        by the patch expert neural network. Used by batched processing.
+
+        Args:
+            image: Input grayscale image
+            center_x, center_y: Landmark position in IMAGE coordinates
+            patch_expert: CENPatchExpert for this landmark
+            window_size: Size of the search window (response map size)
+            sim_img_to_ref: Optional 2x3 similarity transform (IMAGE → REFERENCE)
+            sim_ref_to_img: Optional 2x3 similarity transform (REFERENCE → IMAGE)
+
+        Returns:
+            area_of_interest: Warped image region, or None if extraction fails
+        """
+        # Calculate area of interest size (same as _compute_response_map)
+        if hasattr(patch_expert, 'width_support'):
+            patch_dim = max(patch_expert.width_support, patch_expert.height_support)
+        else:
+            patch_dim = max(patch_expert.width, patch_expert.height)
+
+        area_of_interest_width = window_size + patch_dim - 1
+        area_of_interest_height = window_size + patch_dim - 1
+
+        if sim_img_to_ref is not None and sim_ref_to_img is not None:
+            # WARPING MODE: Use similarity transform to extract warped region
+            # Extract rotation/scale components from sim_ref_to_img
+            a1 = sim_ref_to_img[0, 0]
+            b1 = -sim_ref_to_img[0, 1]  # Note the NEGATIVE sign!
+
+            # Construct the transform exactly as OpenFace does
+            center_offset = (area_of_interest_width - 1.0) / 2.0
+
+            tx = center_x - a1 * center_offset + b1 * center_offset
+            ty = center_y - a1 * center_offset - b1 * center_offset
+
+            # Use float64 for transform matrix precision
+            sim_matrix = np.array([
+                [a1, -b1, tx],
+                [b1,  a1, ty]
+            ], dtype=np.float64)
+
+            # Warp using WARP_INVERSE_MAP
+            area_of_interest = cv2.warpAffine(
+                image,
+                sim_matrix,
+                (area_of_interest_width, area_of_interest_height),
+                flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR
+            )
+        else:
+            # NO WARPING: Direct extraction from image
+            half_aoi = area_of_interest_width // 2
+            x_start = int(center_x) - half_aoi
+            y_start = int(center_y) - half_aoi
+            x_end = x_start + area_of_interest_width
+            y_end = y_start + area_of_interest_height
+
+            # Bounds check with padding
+            if x_start < 0 or y_start < 0 or x_end > image.shape[1] or y_end > image.shape[0]:
+                # Use copyMakeBorder for out-of-bounds regions
+                pad_left = max(0, -x_start)
+                pad_right = max(0, x_end - image.shape[1])
+                pad_top = max(0, -y_start)
+                pad_bottom = max(0, y_end - image.shape[0])
+
+                x_start_safe = max(0, x_start)
+                y_start_safe = max(0, y_start)
+                x_end_safe = min(image.shape[1], x_end)
+                y_end_safe = min(image.shape[0], y_end)
+
+                area_of_interest = image[y_start_safe:y_end_safe, x_start_safe:x_end_safe].copy()
+                area_of_interest = cv2.copyMakeBorder(
+                    area_of_interest,
+                    pad_top, pad_bottom, pad_left, pad_right,
+                    cv2.BORDER_REPLICATE
+                )
+            else:
+                area_of_interest = image[y_start:y_end, x_start:x_end].copy()
+
+        return area_of_interest
+
     def _precompute_response_maps(self,
                                    landmarks_2d: np.ndarray,
                                    patch_experts: dict,
@@ -631,18 +778,19 @@ class NURLMSOptimizer:
                                    sim_img_to_ref: np.ndarray = None,
                                    sim_ref_to_img: np.ndarray = None,
                                    sigma_components: dict = None,
-                                   iteration: int = None,
-                                   use_dual_patch: bool = True) -> dict:
+                                   iteration: int = None) -> dict:
         """
         Precompute response maps at initial landmark positions.
 
         This matches OpenFace's Response() call which computes response maps ONCE
         before optimization, then reuses them for both rigid and non-rigid phases.
 
-        When use_dual_patch=True (default), implements dual-patch processing:
-        - For each landmark, also extract a patch from the MIRROR landmark's location
-        - Flip the mirror patch horizontally and compute its response
-        - Combine responses using np.maximum for enhanced response
+        NOTE: C++ OpenFace processes left/right symmetric landmarks together in a single
+        ResponseSparse() call for efficiency, but each landmark gets its OWN independent
+        response map. There is NO weighted averaging between left and right responses.
+
+        For mirrored landmarks (right side), the MirroredCENPatchExpert wrapper already
+        correctly implements flip-process-flip to use the left side's neural network.
 
         Args:
             landmarks_2d: Initial 2D landmark positions (n_points, 2)
@@ -651,7 +799,6 @@ class NURLMSOptimizer:
             window_size: Response map size
             sim_img_to_ref: Similarity transform (image → reference)
             sim_ref_to_img: Similarity transform (reference → image)
-            use_dual_patch: If True, use dual-patch processing
 
         Returns:
             response_maps: Dict mapping landmark_idx -> response_map array
@@ -659,10 +806,107 @@ class NURLMSOptimizer:
         response_maps = {}
         use_warping = (sim_img_to_ref is not None and sim_ref_to_img is not None)
 
-        for landmark_idx, patch_expert in patch_experts.items():
-            lm_x, lm_y = landmarks_2d[landmark_idx]
+        # C++ STYLE BATCHED PROCESSING FOR MIRROR PAIRS
+        # Identify mirror pairs: left landmarks with real experts and their mirrored counterparts
+        # Process them together using response_sparse like C++ does
+        processed = set()
 
-            # Primary response: extract patch from landmark's own location
+        for landmark_idx, patch_expert in patch_experts.items():
+            if landmark_idx in processed:
+                continue
+
+            # Check if this is a mirrored expert (right side landmark)
+            if isinstance(patch_expert, MirroredCENPatchExpert):
+                # This landmark uses a mirrored expert - it will be processed with its mirror pair
+                # Find the left landmark that has the real expert
+                real_expert = patch_expert._mirror_expert
+                # Find which left landmark has this expert
+                left_idx = None
+                for l_idx, l_expert in patch_experts.items():
+                    if l_expert is real_expert:
+                        left_idx = l_idx
+                        break
+
+                if left_idx is not None and left_idx not in processed:
+                    # Process both together using response_sparse
+                    lm_x_left, lm_y_left = landmarks_2d[left_idx]
+                    lm_x_right, lm_y_right = landmarks_2d[landmark_idx]
+
+                    # Extract AOIs for both landmarks
+                    aoi_left = self._extract_area_of_interest(
+                        image, lm_x_left, lm_y_left, real_expert, window_size,
+                        sim_img_to_ref if use_warping else None,
+                        sim_ref_to_img if use_warping else None
+                    )
+                    aoi_right = self._extract_area_of_interest(
+                        image, lm_x_right, lm_y_right, real_expert, window_size,
+                        sim_img_to_ref if use_warping else None,
+                        sim_ref_to_img if use_warping else None
+                    )
+
+                    if aoi_left is not None and aoi_right is not None:
+                        # Use batched processing like C++
+                        resp_left, resp_right = real_expert.response_sparse(aoi_left, aoi_right)
+                        if resp_left is not None:
+                            response_maps[left_idx] = resp_left
+                        if resp_right is not None:
+                            response_maps[landmark_idx] = resp_right
+                    else:
+                        # Fallback to individual processing if AOI extraction failed
+                        if aoi_left is not None:
+                            response_maps[left_idx] = real_expert.response(aoi_left)
+                        if aoi_right is not None:
+                            response_maps[landmark_idx] = patch_expert.response(aoi_right)
+
+                    processed.add(left_idx)
+                    processed.add(landmark_idx)
+                    continue
+
+            # Check if this is a real CEN expert with a mirror pair
+            if isinstance(patch_expert, CENPatchExpert) and not patch_expert.is_empty:
+                # Find if there's a mirrored landmark that uses this expert
+                mirror_idx = None
+                for m_idx, m_expert in patch_experts.items():
+                    if isinstance(m_expert, MirroredCENPatchExpert):
+                        if m_expert._mirror_expert is patch_expert:
+                            mirror_idx = m_idx
+                            break
+
+                if mirror_idx is not None and mirror_idx not in processed:
+                    # Process both together
+                    lm_x_left, lm_y_left = landmarks_2d[landmark_idx]
+                    lm_x_right, lm_y_right = landmarks_2d[mirror_idx]
+
+                    aoi_left = self._extract_area_of_interest(
+                        image, lm_x_left, lm_y_left, patch_expert, window_size,
+                        sim_img_to_ref if use_warping else None,
+                        sim_ref_to_img if use_warping else None
+                    )
+                    aoi_right = self._extract_area_of_interest(
+                        image, lm_x_right, lm_y_right, patch_expert, window_size,
+                        sim_img_to_ref if use_warping else None,
+                        sim_ref_to_img if use_warping else None
+                    )
+
+                    if aoi_left is not None and aoi_right is not None:
+                        resp_left, resp_right = patch_expert.response_sparse(aoi_left, aoi_right)
+                        if resp_left is not None:
+                            response_maps[landmark_idx] = resp_left
+                        if resp_right is not None:
+                            response_maps[mirror_idx] = resp_right
+                    else:
+                        # Fallback
+                        if aoi_left is not None:
+                            response_maps[landmark_idx] = patch_expert.response(aoi_left)
+                        if aoi_right is not None:
+                            response_maps[mirror_idx] = patch_experts[mirror_idx].response(aoi_right)
+
+                    processed.add(landmark_idx)
+                    processed.add(mirror_idx)
+                    continue
+
+            # Process individually (no mirror pair or self-mirrored landmark like chin)
+            lm_x, lm_y = landmarks_2d[landmark_idx]
             response_map = self._compute_response_map(
                 image, lm_x, lm_y, patch_expert, window_size,
                 sim_img_to_ref if use_warping else None,
@@ -671,147 +915,11 @@ class NURLMSOptimizer:
                 landmark_idx, iteration
             )
 
-            # Dual-patch processing: also extract from mirror landmark location
-            # Key insight: C++ extracts patches from BOTH the landmark's own location AND
-            # its mirror location, then flips the mirror patch and runs BOTH through the
-            # SAME neural network (the landmark's own expert).
-            if use_dual_patch and response_map is not None:
-                mirror_idx = MIRROR_INDS[landmark_idx]
-
-                # Only process if mirror is different from self (asymmetric landmarks)
-                if mirror_idx != landmark_idx and mirror_idx < len(landmarks_2d):
-                    mirror_x, mirror_y = landmarks_2d[mirror_idx]
-
-                    # Compute response at mirror location using THIS landmark's expert
-                    mirror_response = self._compute_response_map_at_mirror(
-                        image, mirror_x, mirror_y, patch_expert, window_size,
-                        sim_img_to_ref if use_warping else None,
-                        sim_ref_to_img if use_warping else None,
-                        sigma_components,
-                        landmark_idx, iteration
-                    )
-
-                    if mirror_response is not None:
-                        # Combine responses using weighted average
-                        # Primary response gets higher weight (extracted from correct location)
-                        # Mirror response provides supporting evidence
-                        primary_weight = 0.9
-                        mirror_weight = 0.1
-                        response_map = primary_weight * response_map + mirror_weight * mirror_response
-
-                        # DEBUG: Log dual-patch combination for landmarks 36 and 42
-                        if landmark_idx in (36, 42) and iteration == 0 and self.debug_mode:
-                            print(f"[PY][DUAL-PATCH][LM{landmark_idx}] Combined with mirror location LM{mirror_idx}")
-                            peak_combined = np.unravel_index(response_map.argmax(), response_map.shape)
-                            print(f"[PY][DUAL-PATCH][LM{landmark_idx}] Combined peak: {peak_combined}")
-
             if response_map is not None:
                 response_maps[landmark_idx] = response_map
+            processed.add(landmark_idx)
 
         return response_maps
-
-    def _compute_response_map_at_mirror(self,
-                                        image: np.ndarray,
-                                        center_x: float,
-                                        center_y: float,
-                                        patch_expert,
-                                        window_size: int,
-                                        sim_img_to_ref: np.ndarray = None,
-                                        sim_ref_to_img: np.ndarray = None,
-                                        sigma_components: dict = None,
-                                        landmark_idx: int = None,
-                                        iteration: int = None) -> Optional[np.ndarray]:
-        """
-        Compute response map at a mirror landmark location using flip-process-flip.
-
-        This implements dual-patch approach:
-        1. Extract area_of_interest from the MIRROR landmark's location
-        2. Flip it horizontally (so it looks like the primary location)
-        3. Process through the primary landmark's expert
-        4. Flip the response back
-
-        Args:
-            image: Input image
-            center_x, center_y: Mirror landmark position in IMAGE coordinates
-            patch_expert: The PRIMARY landmark's expert (NOT the mirror's expert)
-            window_size: Size of search window
-            sim_img_to_ref: Optional 2x3 similarity transform (IMAGE → REFERENCE)
-            sim_ref_to_img: Optional 2x3 similarity transform (REFERENCE → IMAGE)
-
-        Returns:
-            response_map: (window_size, window_size) array, flipped to align with primary
-        """
-        if sim_ref_to_img is None:
-            # Non-warping mode not implemented for mirror
-            return None
-
-        # Calculate area of interest size
-        if hasattr(patch_expert, 'width_support'):
-            patch_dim = max(patch_expert.width_support, patch_expert.height_support)
-        else:
-            patch_dim = max(patch_expert.width, patch_expert.height)
-        area_of_interest_width = window_size + patch_dim - 1
-        area_of_interest_height = window_size + patch_dim - 1
-
-        a1 = sim_ref_to_img[0, 0]
-        b1 = -sim_ref_to_img[0, 1]
-        center_offset = (area_of_interest_width - 1.0) / 2.0
-
-        tx = center_x - a1 * center_offset + b1 * center_offset
-        ty = center_y - a1 * center_offset - b1 * center_offset
-
-        sim_matrix = np.array([
-            [a1, -b1, tx],
-            [b1,  a1, ty]
-        ], dtype=np.float32)
-
-        area_of_interest = cv2.warpAffine(
-            image,
-            sim_matrix,
-            (area_of_interest_width, area_of_interest_height),
-            flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR
-        )
-
-        # FLIP the area_of_interest horizontally before processing
-        area_of_interest_flipped = cv2.flip(area_of_interest, 1)
-
-        if hasattr(patch_expert, 'response') and not hasattr(patch_expert, 'compute_response'):
-            # CEN: Process the FLIPPED input through the expert
-            # If expert is MirroredCENPatchExpert, get the underlying expert
-            if hasattr(patch_expert, '_mirror_expert'):
-                # For mirrored experts, use the underlying mirror expert directly
-                # (since we're already flipping the input, we don't want double-flip)
-                actual_expert = patch_expert._mirror_expert
-            else:
-                actual_expert = patch_expert
-
-            response_map = actual_expert.response(area_of_interest_flipped)
-
-            # FLIP the response back to align with primary
-            response_map = cv2.flip(response_map, 1)
-        else:
-            # CCNF: Not implemented for mirror - return None
-            return None
-
-        # Apply sigma transformation if available
-        response_window_size = response_map.shape[0]
-        if sigma_components is not None and response_window_size in sigma_components:
-            try:
-                sigma_comps = sigma_components[response_window_size]
-                Sigma = patch_expert.compute_sigma(sigma_comps, window_size=response_window_size, debug=False)
-                response_shape = response_map.shape
-                response_vec = response_map.reshape(-1, 1)
-                response_transformed = Sigma @ response_vec
-                response_map = response_transformed.reshape(response_shape)
-            except Exception:
-                pass
-
-        # Normalize (remove negative values)
-        min_val = response_map.min()
-        if min_val < 0:
-            response_map = response_map - min_val
-
-        return response_map
 
     def _compute_mean_shift(self,
                            landmarks_2d: np.ndarray,
@@ -847,8 +955,11 @@ class NURLMSOptimizer:
         n_points = landmarks_2d.shape[0]
         mean_shift = np.zeros(2 * n_points)
 
+        # Use scale-adapted sigma if available, otherwise use base
+        current_sigma = getattr(self, '_current_sigma', self.sigma)
+
         # Gaussian kernel parameter for KDE: a_kde = -0.5 / sigma^2
-        a_kde = -0.5 / (self.sigma * self.sigma)
+        a_kde = -0.5 / (current_sigma * current_sigma)
 
         # Check if we should use warping (transforms provided)
         use_warping = (sim_img_to_ref is not None and sim_ref_to_img is not None)
@@ -962,12 +1073,18 @@ class NURLMSOptimizer:
         Returns:
             kde_kernel: Precomputed KDE kernel
         """
-        if window_size in self.kde_cache:
-            return self.kde_cache[window_size]
+        # Use scale-adapted sigma if available, otherwise use base
+        current_sigma = getattr(self, '_current_sigma', self.sigma)
+
+        # Cache key includes both window_size and sigma (rounded to avoid float key issues)
+        cache_key = (window_size, round(current_sigma * 100))
+
+        if cache_key in self.kde_cache:
+            return self.kde_cache[cache_key]
 
         # Compute KDE kernel (OpenFace uses step_size=0.1 for sub-pixel precision)
         step_size = 0.1
-        a = -0.5 / (self.sigma * self.sigma)
+        a = -0.5 / (current_sigma * current_sigma)
 
         # Number of discrete positions
         n_steps = int(window_size / step_size)
@@ -986,7 +1103,7 @@ class NURLMSOptimizer:
                         dist_sq = (dy - ii)**2 + (dx - jj)**2
                         kernel[i_x, i_y, ii, jj] = np.exp(a * dist_sq)
 
-        self.kde_cache[window_size] = kernel
+        self.kde_cache[cache_key] = kernel
         return kernel
 
     def _precompute_kde_grid(self, resp_size: int, a: float) -> np.ndarray:
@@ -1190,10 +1307,11 @@ class NURLMSOptimizer:
             tx = center_x - a1 * center_offset + b1 * center_offset
             ty = center_y - a1 * center_offset - b1 * center_offset
 
+            # Use float64 for transform matrix precision (matches C++ double)
             sim_matrix = np.array([
                 [a1, -b1, tx],
                 [b1,  a1, ty]
-            ], dtype=np.float32)
+            ], dtype=np.float64)
 
             # Warp using WARP_INVERSE_MAP (OpenFace line 245)
             # This inverts sim_matrix, effectively applying sim_img_to_ref
@@ -1263,11 +1381,8 @@ class NURLMSOptimizer:
                             area_of_interest, patch_x, patch_y,
                             patch_expert.width, patch_expert.height
                         )
-
-                        if patch is not None:
-                            response_map[i, j] = patch_expert.compute_response(patch)
-                        else:
-                            response_map[i, j] = -1e10
+                        # _extract_patch now always returns valid patch with border replication
+                        response_map[i, j] = patch_expert.compute_response(patch)
         else:
             # NO WARPING: Direct extraction from image (not typically used with OpenFace)
             # Check if this is CEN (has response() method) or CCNF (has compute_response())
@@ -1313,10 +1428,8 @@ class NURLMSOptimizer:
                             patch_expert.width, patch_expert.height
                         )
 
-                        if patch is not None:
-                            response_map[i, j] = patch_expert.compute_response(patch)
-                        else:
-                            response_map[i, j] = -1e10  # Very low response for out-of-bounds
+                        # _extract_patch now always returns valid patch with border replication (matches C++ OpenFace)
+                        response_map[i, j] = patch_expert.compute_response(patch)
 
         # DEBUG: Save response map BEFORE sigma for landmarks 36 and 42
         if landmark_idx in (36, 42) and iteration == 0 and window_size == 11 and self.debug_mode and not is_mirror_patch:
@@ -1394,9 +1507,12 @@ class NURLMSOptimizer:
                       center_x: int,
                       center_y: int,
                       patch_width: int,
-                      patch_height: int) -> Optional[np.ndarray]:
+                      patch_height: int) -> np.ndarray:
         """
         Extract image patch centered at (center_x, center_y).
+
+        Uses border replication for out-of-bounds regions, matching C++ OpenFace
+        behavior. This prevents suppression of landmarks near image edges.
 
         Args:
             image: Source image
@@ -1404,7 +1520,7 @@ class NURLMSOptimizer:
             patch_width, patch_height: Patch dimensions
 
         Returns:
-            patch: Extracted patch, or None if out of bounds
+            patch: Extracted patch (always returns a valid patch using border replication)
         """
         half_w = patch_width // 2
         half_h = patch_height // 2
@@ -1415,12 +1531,48 @@ class NURLMSOptimizer:
         x2 = x1 + patch_width
         y2 = y1 + patch_height
 
-        # Check bounds
-        if x1 < 0 or y1 < 0 or x2 > image.shape[1] or y2 > image.shape[0]:
-            return None
+        # Check if patch is within bounds
+        if x1 >= 0 and y1 >= 0 and x2 <= image.shape[1] and y2 <= image.shape[0]:
+            # Fast path: fully within bounds
+            return image[y1:y2, x1:x2]
 
-        # Extract patch
-        patch = image[y1:y2, x1:x2]
+        # Slow path: use border replication for out-of-bounds regions
+        # This matches C++ OpenFace's cv::warpAffine with BORDER_REPLICATE
+        img_h, img_w = image.shape[:2]
+
+        # Compute padding needed on each side
+        pad_left = max(0, -x1)
+        pad_top = max(0, -y1)
+        pad_right = max(0, x2 - img_w)
+        pad_bottom = max(0, y2 - img_h)
+
+        # If entire patch is outside image, return edge pixel replicated
+        if x1 >= img_w or x2 <= 0 or y1 >= img_h or y2 <= 0:
+            # Completely outside - return corner pixel replicated
+            corner_x = max(0, min(center_x, img_w - 1))
+            corner_y = max(0, min(center_y, img_h - 1))
+            if len(image.shape) == 3:
+                return np.full((patch_height, patch_width, image.shape[2]),
+                              image[corner_y, corner_x], dtype=image.dtype)
+            else:
+                return np.full((patch_height, patch_width),
+                              image[corner_y, corner_x], dtype=image.dtype)
+
+        # Clamp bounds to valid image region
+        src_x1 = max(0, x1)
+        src_y1 = max(0, y1)
+        src_x2 = min(img_w, x2)
+        src_y2 = min(img_h, y2)
+
+        # Extract the valid portion
+        valid_patch = image[src_y1:src_y2, src_x1:src_x2]
+
+        # Apply border replication padding
+        patch = cv2.copyMakeBorder(
+            valid_patch,
+            pad_top, pad_bottom, pad_left, pad_right,
+            cv2.BORDER_REPLICATE
+        )
 
         return patch
 
@@ -1542,14 +1694,17 @@ class NURLMSOptimizer:
         Returns:
             delta_p: Parameter update (m,)
         """
+        # Use scale-adapted regularization if available, otherwise use base
+        current_reg = getattr(self, '_current_regularization', self.regularization)
+
         # Compute left-hand side: A = J^T·W·J + λ·Λ^(-1)
         JtWJ = J.T @ W @ J  # (m, m)
-        Lambda_inv_diag = np.diag(self.regularization * Lambda_inv)  # (m, m)
+        Lambda_inv_diag = np.diag(current_reg * Lambda_inv)  # (m, m)
         A = JtWJ + Lambda_inv_diag
 
         # Compute right-hand side: b = J^T·W·v - λ·Λ^(-1)·p
         JtWv = J.T @ W @ v  # (m,)
-        reg_term = self.regularization * Lambda_inv * params  # (m,)
+        reg_term = current_reg * Lambda_inv * params  # (m,)
         b = JtWv - reg_term
 
         # DEBUG: Save parameter update details for first iteration NON-RIGID phase
