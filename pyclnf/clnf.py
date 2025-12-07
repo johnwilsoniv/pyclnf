@@ -234,6 +234,7 @@ class CLNF:
             image: np.ndarray,
             face_bbox: Tuple[float, float, float, float],
             initial_params: Optional[np.ndarray] = None,
+            landmarks_5pt: Optional[np.ndarray] = None,
             return_params: bool = False) -> Tuple[np.ndarray, Dict]:
         """
         Fit CLNF model to detect facial landmarks.
@@ -242,6 +243,9 @@ class CLNF:
             image: Input image (grayscale or color, will be converted to grayscale)
             face_bbox: Face bounding box [x, y, width, height]
             initial_params: Optional initial parameter guess (default: from bbox)
+            landmarks_5pt: Optional 5-point MTCNN landmarks for better initialization.
+                           Shape (5, 2) with [left_eye, right_eye, nose, left_mouth, right_mouth].
+                           If provided, estimates initial pose from these landmarks.
             return_params: If True, include optimized parameters in info dict
 
         Returns:
@@ -258,7 +262,7 @@ class CLNF:
         else:
             gray = image
 
-        # Initialize parameters from bounding box
+        # Initialize parameters from bounding box (and optionally 5-point landmarks)
         if initial_params is None:
             # Phase 2: Video mode temporal warm-start
             # Use previous frame's params as starting point for faster convergence
@@ -271,6 +275,12 @@ class CLNF:
                 params[5] = new_bbox_init[5]  # ty
                 if self.debug_mode:
                     print(f"[VIDEO_MODE] Using warm-start from previous frame")
+            elif landmarks_5pt is not None and landmarks_5pt.shape == (5, 2):
+                # Use 5-point landmarks for initial pose estimation (like C++ OpenFace)
+                params = self.pdm.init_params_from_5pt(face_bbox, landmarks_5pt)
+                if self.debug_mode:
+                    print(f"[INIT] Using 5-point landmarks for pose estimation")
+                    print(f"  scale={params[0]:.4f}, rot=({params[1]:.4f}, {params[2]:.4f}, {params[3]:.4f})")
             else:
                 params = self.pdm.init_params(face_bbox)
         else:
@@ -532,14 +542,16 @@ class CLNF:
             image_bgr = image
 
         # Detect faces - handle different detector APIs
+        landmarks_5pt_all = None  # Will store 5-point landmarks if available
         if hasattr(self.detector, 'detect_and_correct'):
-            # RetinaFace corrected detector
+            # RetinaFace corrected detector (no 5-point landmarks)
             bboxes = self.detector.detect_and_correct(image_bgr)
         elif hasattr(self.detector, 'detect'):
-            # MTCNN detector - returns (bboxes, landmarks)
+            # MTCNN detector - returns (bboxes, landmarks_5pt)
             result = self.detector.detect(image_bgr)
-            if isinstance(result, tuple):
+            if isinstance(result, tuple) and len(result) >= 2:
                 bboxes = result[0]  # (N, 4) array of [x, y, w, h]
+                landmarks_5pt_all = result[1]  # (N, 5, 2) array of 5-point landmarks
                 # Convert numpy array to list of tuples for compatibility
                 bboxes = [tuple(bbox) for bbox in bboxes]
             else:
@@ -553,8 +565,10 @@ class CLNF:
         # Process all faces if requested
         if return_all_faces:
             results = []
-            for bbox in bboxes:
-                landmarks, info = self.fit(image, bbox, return_params=return_params)
+            for i, bbox in enumerate(bboxes):
+                # Get corresponding 5-point landmarks if available
+                lm5 = landmarks_5pt_all[i] if landmarks_5pt_all is not None else None
+                landmarks, info = self.fit(image, bbox, landmarks_5pt=lm5, return_params=return_params)
                 info['bbox'] = bbox  # Add bbox to info
                 results.append((landmarks, info))
             return results
@@ -564,13 +578,17 @@ class CLNF:
         # Python bboxes are (x, y, width, height), so bbox[2] is width
         if len(bboxes) == 1:
             bbox = bboxes[0]
+            largest_idx = 0
         else:
             # Select largest face by width (matching C++ DetectSingleFaceMTCNN)
             widths = [bbox[2] for bbox in bboxes]
             largest_idx = np.argmax(widths)
             bbox = bboxes[largest_idx]
 
-        landmarks, info = self.fit(image, bbox, return_params=return_params)
+        # Get 5-point landmarks for the selected face
+        landmarks_5pt = landmarks_5pt_all[largest_idx] if landmarks_5pt_all is not None else None
+
+        landmarks, info = self.fit(image, bbox, landmarks_5pt=landmarks_5pt, return_params=return_params)
         info['bbox'] = bbox  # Add bbox to info
         return landmarks, info
 

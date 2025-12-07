@@ -173,7 +173,7 @@ class NURLMSOptimizer:
 
     def __init__(self,
                  regularization: float = 22.5,  # C++ CECLM: 25.0 base × 0.9 = 22.5
-                 max_iterations: int = 10,
+                 max_iterations: int = 10,  # More iterations help Python converge
                  convergence_threshold: float = 0.005,  # Gold standard (stricter than 0.01)
                  sigma: float = 2.25,  # C++ CECLM: 1.5 base × 1.5 = 2.25
                  weight_multiplier: float = 0.0,  # C++ video mode (disabled)
@@ -439,6 +439,8 @@ class NURLMSOptimizer:
                 self.convergence_threshold > 0):
                 # Total shape change norm (not per-landmark mean)
                 shape_change = np.linalg.norm(current_landmarks - previous_landmarks)
+                if self.debug_mode and window_size == 11:
+                    print(f"[DEBUG] RIGID iter {rigid_iter}: shape_change = {shape_change:.6f} (threshold: 0.01)")
                 if shape_change < 0.01:  # Fixed threshold matching C++ line 1173
                     rigid_converged = True
                     break
@@ -452,11 +454,12 @@ class NURLMSOptimizer:
 
             # Debug: Print mean-shift for first iteration
             if self.debug_mode and rigid_iter == 0:
-                print(f"[PY][ITER0_WS{window_size}] RIGID Mean-shift vectors:")
+                print(f"[PY][ITER0_WS{window_size}] RIGID Mean-shift vectors (STACKED format):")
+                n_lm = len(current_landmarks)
                 for lm_idx in self.tracked_landmarks:
-                    if lm_idx < len(current_landmarks):
-                        ms_x = mean_shift[2 * lm_idx]
-                        ms_y = mean_shift[2 * lm_idx + 1]
+                    if lm_idx < n_lm:
+                        ms_x = mean_shift[lm_idx]
+                        ms_y = mean_shift[lm_idx + n_lm]
                         ms_mag = np.sqrt(ms_x**2 + ms_y**2)
                         print(f"[PY][ITER0_WS{window_size}]   Landmark_{lm_idx}: ms=({ms_x:.4f}, {ms_y:.4f}) mag={ms_mag:.4f}")
 
@@ -473,9 +476,15 @@ class NURLMSOptimizer:
             rigid_params = pdm.clamp_params(rigid_params)
 
             # Track rigid iteration info
+            # STACKED format: first n values are x, next n are y
             n_landmarks = len(mean_shift) // 2
-            per_landmark_ms = [np.sqrt(mean_shift[2*i]**2 + mean_shift[2*i+1]**2)
+            per_landmark_ms = [np.sqrt(mean_shift[i]**2 + mean_shift[i + n_landmarks]**2)
                               for i in range(n_landmarks)]
+
+            # Reshape for norm calculation: convert stacked to (n, 2) for per-landmark magnitude
+            ms_x = mean_shift[:n_landmarks]
+            ms_y = mean_shift[n_landmarks:]
+            ms_2d = np.column_stack([ms_x, ms_y])  # (n, 2)
 
             iteration_info.append({
                 'iteration': len(iteration_info),  # Global iteration counter
@@ -484,7 +493,7 @@ class NURLMSOptimizer:
                 'update_magnitude': np.linalg.norm(delta_p_rigid),
                 'params': rigid_params.copy(),
                 'mean_shift_norm': np.linalg.norm(mean_shift),
-                'mean_shift_mean': np.mean(np.linalg.norm(mean_shift.reshape(-1, 2), axis=1)),
+                'mean_shift_mean': np.mean(np.linalg.norm(ms_2d, axis=1)),
                 'jacobian_norm': np.linalg.norm(J_rigid),
                 'regularization': 0.0,  # No regularization in rigid phase
                 # Enhanced diagnostics
@@ -564,11 +573,12 @@ class NURLMSOptimizer:
 
             # Debug: Print mean-shift for first iteration
             if self.debug_mode and nonrigid_iter == 0:
-                print(f"[PY][ITER0_WS{window_size}] NONRIGID Mean-shift vectors:")
+                print(f"[PY][ITER0_WS{window_size}] NONRIGID Mean-shift vectors (STACKED format):")
+                n_lm = len(current_landmarks)
                 for lm_idx in self.tracked_landmarks:
-                    if lm_idx < len(current_landmarks):
-                        ms_x = mean_shift[2 * lm_idx]
-                        ms_y = mean_shift[2 * lm_idx + 1]
+                    if lm_idx < n_lm:
+                        ms_x = mean_shift[lm_idx]
+                        ms_y = mean_shift[lm_idx + n_lm]
                         ms_mag = np.sqrt(ms_x**2 + ms_y**2)
                         print(f"[PY][ITER0_WS{window_size}]   Landmark_{lm_idx}: ms=({ms_x:.4f}, {ms_y:.4f}) mag={ms_mag:.4f}")
 
@@ -583,9 +593,15 @@ class NURLMSOptimizer:
             params = pdm.clamp_params(params)
 
             # Track iteration info with enhanced diagnostics
+            # STACKED format: first n values are x, next n are y
             n_landmarks = len(mean_shift) // 2
-            per_landmark_ms = [np.sqrt(mean_shift[2*i]**2 + mean_shift[2*i+1]**2)
+            per_landmark_ms = [np.sqrt(mean_shift[i]**2 + mean_shift[i + n_landmarks]**2)
                               for i in range(n_landmarks)]
+
+            # Reshape for norm calculation: convert stacked to (n, 2) for per-landmark magnitude
+            ms_x = mean_shift[:n_landmarks]
+            ms_y = mean_shift[n_landmarks:]
+            ms_2d = np.column_stack([ms_x, ms_y])  # (n, 2)
 
             iteration_info.append({
                 'iteration': len(iteration_info),  # Global iteration counter
@@ -594,7 +610,7 @@ class NURLMSOptimizer:
                 'update_magnitude': np.linalg.norm(delta_p),
                 'params': params.copy(),
                 'mean_shift_norm': np.linalg.norm(mean_shift),
-                'mean_shift_mean': np.mean(np.linalg.norm(mean_shift.reshape(-1, 2), axis=1)),
+                'mean_shift_mean': np.mean(np.linalg.norm(ms_2d, axis=1)),
                 'jacobian_norm': np.linalg.norm(J),
                 'regularization': self.regularization,
                 # Enhanced diagnostics for late-stage convergence analysis
@@ -1045,8 +1061,9 @@ class NURLMSOptimizer:
                 ms_x = ms_ref_x
                 ms_y = ms_ref_y
 
-            mean_shift[2 * landmark_idx] = ms_x
-            mean_shift[2 * landmark_idx + 1] = ms_y
+            # STACKED format: [ms_x[0], ..., ms_x[n-1], ms_y[0], ..., ms_y[n-1]]
+            mean_shift[landmark_idx] = ms_x
+            mean_shift[landmark_idx + n_points] = ms_y
 
             # DEBUG: Print mean-shift computation details for landmark 36
             if landmark_idx == 36 and iteration == 0 and window_size == 11 and self.debug_mode:
@@ -1058,14 +1075,14 @@ class NURLMSOptimizer:
 
         # DEBUG: Print mean_shift vector stats
         if iteration == 0 and window_size == 11 and self.debug_mode:
-            print(f"\n[DEBUG] Mean-shift vector computed:")
+            print(f"\n[DEBUG] Mean-shift vector computed (STACKED format):")
             print(f"[DEBUG]   Total landmarks: {len(response_maps)}")
             print(f"[DEBUG]   Mean-shift norm: {np.linalg.norm(mean_shift):.4f}")
             print(f"[DEBUG]   Mean-shift for landmarks 36, 48:")
             for lm_idx in [36, 48]:
                 if lm_idx in response_maps:
-                    ms_x = mean_shift[2 * lm_idx]
-                    ms_y = mean_shift[2 * lm_idx + 1]
+                    ms_x = mean_shift[lm_idx]
+                    ms_y = mean_shift[lm_idx + n_points]
                     print(f"[DEBUG]     Landmark {lm_idx}: ({ms_x:.4f}, {ms_y:.4f})")
 
         return mean_shift
