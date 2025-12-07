@@ -1630,36 +1630,6 @@ class NURLMSOptimizer:
         # Compute right-hand side: b = J^T·W·v
         b = J_rigid.T @ W @ v  # (6,)
 
-        # DEBUG: Save parameter update details for first iteration RIGID phase
-        if iteration == 0 and window_size == 11 and self.debug_mode:
-            import os
-            with open('/tmp/python_param_update_iter0.txt', 'a' if os.path.exists('/tmp/python_param_update_iter0.txt') else 'w') as f:
-                f.write(f"=== ITER0_WS11_RIGID ===\n")
-
-                # Print intermediate computation details
-                print(f"\n[DEBUG] RIGID J_w_t_m computation:")
-                print(f"[DEBUG]   mean_shift norm: {np.linalg.norm(v):.4f}")
-                print(f"[DEBUG]   W trace: {np.trace(W):.4f}, mean: {np.mean(np.diag(W)):.4f}")
-                print(f"[DEBUG]   J_rigid shape: {J_rigid.shape}")
-                print(f"[DEBUG]   J_rigid norm: {np.linalg.norm(J_rigid):.4f}")
-
-                # Compute step by step
-                W_v = W @ v
-                print(f"[DEBUG]   W @ v norm: {np.linalg.norm(W_v):.4f}")
-                print(f"[DEBUG]   b = J^T @ W @ v:")
-                for i in range(len(b)):
-                    print(f"[DEBUG]     b[{i}] = {b[i]:.4f}")
-
-                # Save J_w_t_m (which is b in our case)
-                f.write(f"J_w_t_m (size {len(b)}):\n")
-                for i in range(len(b)):
-                    f.write(f"  J_w_t_m[{i}]: {b[i]:.8f}\n")
-
-                # Save Hessian diagonal
-                f.write(f"Hessian diagonal:\n")
-                for i in range(len(A)):
-                    f.write(f"  Hessian[{i},{i}]: {A[i,i]:.8f}\n")
-
         # Solve linear system: A·Δp = b using Cholesky (matches C++ cv::DECOMP_CHOLESKY)
         try:
             L = np.linalg.cholesky(A)
@@ -1672,24 +1642,9 @@ class NURLMSOptimizer:
             except np.linalg.LinAlgError:
                 delta_p_rigid = np.linalg.lstsq(A, b, rcond=None)[0]
 
-        # DEBUG: Save param_update after solving
-        if iteration == 0 and window_size == 11 and self.debug_mode:
-            with open('/tmp/python_param_update_iter0.txt', 'a') as f:
-                f.write(f"param_update (size {len(delta_p_rigid)}) BEFORE damping:\n")
-                for i in range(len(delta_p_rigid)):
-                    f.write(f"  param_update[{i}]: {delta_p_rigid[i]:.8f}\n")
-
         # Apply learning rate damping (OpenFace PDM.cpp line 677)
         # C++ uses 0.75 damping for rigid parameters
         delta_p_rigid = 0.75 * delta_p_rigid
-
-        # DEBUG: Save param_update after damping
-        if iteration == 0 and window_size == 11 and self.debug_mode:
-            with open('/tmp/python_param_update_iter0.txt', 'a') as f:
-                f.write(f"param_update (size {len(delta_p_rigid)}) AFTER damping (0.75):\n")
-                for i in range(len(delta_p_rigid)):
-                    f.write(f"  param_update[{i}]: {delta_p_rigid[i]:.8f}\n")
-                f.write(f"\n")
 
         return delta_p_rigid
 
@@ -1731,38 +1686,6 @@ class NURLMSOptimizer:
         reg_term = current_reg * Lambda_inv * params  # (m,)
         b = JtWv - reg_term
 
-        # DEBUG: Save parameter update details for first iteration NON-RIGID phase
-        if iteration == 0 and window_size == 11 and self.debug_mode:
-            import os
-            with open('/tmp/python_param_update_iter0.txt', 'a' if os.path.exists('/tmp/python_param_update_iter0.txt') else 'w') as f:
-                f.write(f"=== ITER0_WS11_NONRIGID ===\n")
-
-                # Save J_w_t_m (which is b in our case)
-                f.write(f"J_w_t_m (size {len(b)}):\n")
-                for i in range(min(20, len(b))):
-                    f.write(f"  J_w_t_m[{i}]: {b[i]:.8f}\n")
-
-                # Save Hessian diagonal (which is A in our case)
-                f.write(f"Hessian diagonal (first 20):\n")
-                for i in range(min(20, len(A))):
-                    f.write(f"  Hessian[{i},{i}]: {A[i,i]:.8f}\n")
-
-                # Will save param_update after solving
-                f.write(f"(param_update will be computed next)\n")
-
-                # Save current params before update
-                f.write(f"current_params BEFORE update:\n")
-                f.write(f"  scale: {params[0]:.8f}\n")
-                f.write(f"  rot_x: {params[1]:.8f}\n")
-                f.write(f"  rot_y: {params[2]:.8f}\n")
-                f.write(f"  rot_z: {params[3]:.8f}\n")
-                f.write(f"  trans_x: {params[4]:.8f}\n")
-                f.write(f"  trans_y: {params[5]:.8f}\n")
-
-                f.write(f"current_local BEFORE update (first 10):\n")
-                for i in range(min(10, len(params) - 6)):
-                    f.write(f"  current_local[{i}]: {params[6+i]:.8f}\n")
-
         # Solve linear system: A·Δp = b using Cholesky decomposition
         # C++ OpenFace uses cv::DECOMP_CHOLESKY which is more numerically stable
         # for positive-definite systems (guaranteed by regularization)
@@ -1785,24 +1708,9 @@ class NURLMSOptimizer:
         self._last_jtw_norm = np.linalg.norm(JtWv)
         self._last_reg_term_norm = np.linalg.norm(reg_term)
 
-        # DEBUG: Save param_update after solving
-        if iteration == 0 and window_size == 11 and self.debug_mode:
-            with open('/tmp/python_param_update_iter0.txt', 'a') as f:
-                f.write(f"param_update (size {len(delta_p)}) BEFORE damping:\n")
-                for i in range(min(20, len(delta_p))):
-                    f.write(f"  param_update[{i}]: {delta_p[i]:.8f}\n")
-
         # Apply learning rate damping (OpenFace PDM.cpp line 677)
         # C++ uses 0.75 damping for all parameters
         delta_p = 0.75 * delta_p
-
-        # DEBUG: Save param_update after damping
-        if iteration == 0 and window_size == 11 and self.debug_mode:
-            with open('/tmp/python_param_update_iter0.txt', 'a') as f:
-                f.write(f"param_update (size {len(delta_p)}) AFTER damping (0.75):\n")
-                for i in range(min(20, len(delta_p))):
-                    f.write(f"  param_update[{i}]: {delta_p[i]:.8f}\n")
-                f.write(f"\n")
 
         return delta_p
 
