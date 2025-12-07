@@ -482,6 +482,86 @@ class PDM:
 
         return params
 
+    def init_params_with_rotation(self, bbox: Tuple[float, float, float, float],
+                                   rotation: np.ndarray) -> np.ndarray:
+        """
+        Initialize parameters from bounding box with specified rotation.
+
+        This matches C++ PDM::CalcParams(params_global, bbox, params_local, rotation).
+        Used for multi-hypothesis testing where different rotations are tried.
+
+        C++ calculates scale and translation by:
+        1. Computing the rotated mean shape
+        2. Finding min/max bounds of rotated shape
+        3. Computing scale from bbox dimensions vs rotated shape bounds
+        4. Computing translation to center the face
+
+        Args:
+            bbox: Bounding box [x, y, width, height]
+            rotation: Rotation vector [wx, wy, wz] in radians (pitch, yaw, roll)
+
+        Returns:
+            params: Initial parameter vector with specified rotation
+        """
+        params = np.zeros(self.n_params)
+
+        # Apply MTCNN-style preprocessing
+        bbox = self._apply_mtcnn_bbox_preprocessing(bbox)
+        x, y, width, height = bbox
+
+        # Get mean shape (local params = 0)
+        mean_shape_3d = self.mean_shape.reshape(3, -1)  # Shape: (3, 68)
+
+        # Build rotation matrix from rotation vector using Rodrigues formula
+        # C++ uses Euler2RotationMatrix which expects (pitch, yaw, roll)
+        # OpenCV's Rodrigues uses axis-angle, but for small angles this is similar
+        # For exact match, we need to implement the same Euler angle convention
+        wx, wy, wz = rotation
+
+        # C++ Euler2RotationMatrix convention:
+        # R = Rz * Ry * Rx (rotate around X first, then Y, then Z)
+        cx, sx = np.cos(wx), np.sin(wx)
+        cy, sy = np.cos(wy), np.sin(wy)
+        cz, sz = np.cos(wz), np.sin(wz)
+
+        # Build rotation matrix (same as C++ Utilities::Euler2RotationMatrix)
+        R = np.array([
+            [cz*cy, cz*sy*sx - sz*cx, cz*sy*cx + sz*sx],
+            [sz*cy, sz*sy*sx + cz*cx, sz*sy*cx - cz*sx],
+            [-sy, cy*sx, cy*cx]
+        ])
+
+        # Rotate the mean shape
+        rotated_shape = R @ mean_shape_3d  # (3, 68)
+
+        # Find bounding box of rotated model shape
+        min_x_m = rotated_shape[0, :].min()
+        max_x_m = rotated_shape[0, :].max()
+        min_y_m = rotated_shape[1, :].min()
+        max_y_m = rotated_shape[1, :].max()
+
+        model_width = abs(max_x_m - min_x_m)
+        model_height = abs(max_y_m - min_y_m)
+
+        # OpenFace formula: average of width and height scaling
+        scaling = ((width / model_width) + (height / model_height)) / 2.0
+
+        # Translation with correction for model center offset
+        tx = x + width / 2.0 - scaling * (min_x_m + max_x_m) / 2.0
+        ty = y + height / 2.0 - scaling * (min_y_m + max_y_m) / 2.0
+
+        # Set parameters (OpenFace order: [s, wx, wy, wz, tx, ty, local...])
+        params[0] = scaling
+        params[1] = wx  # pitch
+        params[2] = wy  # yaw
+        params[3] = wz  # roll
+        params[4] = tx
+        params[5] = ty
+        # Shape parameters = 0 (mean shape)
+        params[6:] = 0.0
+
+        return params
+
     def init_params_from_5pt(self, bbox: Tuple[float, float, float, float],
                               landmarks_5pt: np.ndarray) -> np.ndarray:
         """
