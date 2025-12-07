@@ -583,29 +583,6 @@ class HierarchicalEyeModel:
         # Extract current eye landmarks from main model (in scaled coordinates)
         current_eye = scaled_landmarks[main_indices]  # (6, 2)
 
-        # DEBUG: Save pre-refinement eye landmarks
-        if side == 'left':  # Only debug left eye to avoid duplicate output
-            # Initialize Eye_8 trace file
-            self._eye8_trace_file = '/tmp/eye8_trace_python.txt'
-            with open(self._eye8_trace_file, 'w') as f:
-                f.write("=== PYTHON Eye_8 Trace (LM36 = Left Eye Outer Corner) ===\n")
-                f.write(f"Main model LM36 position: ({main_landmarks[36, 0]:.6f}, {main_landmarks[36, 1]:.6f})\n")
-
-            with open('/tmp/python_eye_model_debug.txt', 'w') as f:
-                f.write("=== PYTHON EYE MODEL DEBUG ===\n\n")
-                f.write("Pre-refinement eye landmarks:\n")
-                for i in main_indices:
-                    f.write(f"  {i}: ({main_landmarks[i, 0]:.4f}, {main_landmarks[i, 1]:.4f})\n")
-
-            # Also write detailed debug file to match C++ format
-            with open('/tmp/python_eye_model_detailed.txt', 'w') as f:
-                f.write("=== Python EYE MODEL DETAILED DEBUG ===\n")
-                f.write(f"n_points: 28\n")
-                f.write(f"window_sizes: {self.window_sizes}\n")
-                f.write(f"sigma: {self.sigma}\n")
-                f.write(f"reg_factor: {self.reg_factor}\n")
-                f.write(f"max_iterations: {self.max_iterations}\n\n")
-
         # Initialize eye PDM parameters using Procrustes alignment
         # Pass main model rotation for proper 3D pose initialization
         params = self._fit_eye_shape(current_eye, mapping, side, main_rotation)
@@ -616,15 +593,6 @@ class HierarchicalEyeModel:
 
         # Get all 28 eye landmarks for optimization
         eye_landmarks = pdm.params_to_landmarks_2d(params)
-
-        # DEBUG: Log initial eye PDM state
-        if side == 'left':
-            with open('/tmp/python_eye_model_detailed.txt', 'a') as f:
-                f.write(f"--- Eye Model NONRIGID Phase Start ---\n")
-                f.write(f"Initial global params: scale={params[0]:.6f} rot=({params[1]:.6f},{params[2]:.6f},{params[3]:.6f}) tx={params[4]:.6f} ty={params[5]:.6f}\n")
-                f.write("Initial eye landmarks (28 points):\n")
-                for i in range(28):
-                    f.write(f"  {i}: ({eye_landmarks[i, 0]:.4f}, {eye_landmarks[i, 1]:.4f})\n")
 
         # Hierarchical optimization over window sizes (C++ uses [3, 5, 9])
         for window_idx, window_size in enumerate(self.window_sizes):
@@ -642,18 +610,8 @@ class HierarchicalEyeModel:
             # Get patch experts for this scale
             patch_experts = ccnf.get_all_patch_experts(patch_scale)
 
-            # DEBUG: Log window size and scale
-            if side == 'left':
-                with open('/tmp/python_eye_model_detailed.txt', 'a') as f:
-                    f.write(f"\n=== Window Size {window_size}, Scale {patch_scale} ===\n")
-                    f.write(f"scaled_sigma: {self._current_sigma:.4f} (base: {self.sigma})\n")
-                    f.write(f"num_patch_experts: {len(patch_experts) if patch_experts else 0}\n")
-
             if not patch_experts:
                 # No patch experts for this scale, skip to next window size
-                if side == 'left':
-                    with open('/tmp/python_eye_model_detailed.txt', 'a') as f:
-                        f.write(f"SKIPPING: No patch experts for scale {patch_scale}!\n")
                 continue
 
             # CRITICAL: Precompute response maps ONCE at initial positions for this window size
@@ -667,46 +625,18 @@ class HierarchicalEyeModel:
                 initial_eye_landmarks, params, pdm, side, patch_scale
             )
 
-            # DEBUG: Log similarity transform
-            if side == 'left' and window_idx == 0:
-                a1, b1 = sim_ref_to_img[0, 0], -sim_ref_to_img[0, 1]
-                with open('/tmp/python_eye_model_detailed.txt', 'a') as f:
-                    f.write(f"\nsim_ref_to_img: a1={a1:.6f}, b1={b1:.6f}\n")
-                    f.write(f"sim_ref_to_img matrix:\n")
-                    f.write(f"  [{sim_ref_to_img[0,0]:.6f}, {sim_ref_to_img[0,1]:.6f}]\n")
-                    f.write(f"  [{sim_ref_to_img[1,0]:.6f}, {sim_ref_to_img[1,1]:.6f}]\n")
-
-                # Eye_8 trace: transforms
-                with open(self._eye8_trace_file, 'a') as f:
-                    f.write(f"\n=== Window Size {window_size} ===\n")
-                    f.write(f"Initial Eye_8: ({eye_landmarks[8, 0]:.6f}, {eye_landmarks[8, 1]:.6f})\n")
-                    f.write(f"sim_img_to_ref:\n")
-                    f.write(f"  [{sim_img_to_ref[0,0]:.8f}, {sim_img_to_ref[0,1]:.8f}]\n")
-                    f.write(f"  [{sim_img_to_ref[1,0]:.8f}, {sim_img_to_ref[1,1]:.8f}]\n")
-                    f.write(f"sim_ref_to_img:\n")
-                    f.write(f"  [{sim_ref_to_img[0,0]:.8f}, {sim_ref_to_img[0,1]:.8f}]\n")
-                    f.write(f"  [{sim_ref_to_img[1,0]:.8f}, {sim_ref_to_img[1,1]:.8f}]\n")
-
             response_maps = self._compute_eye_response_maps(
                 scaled_image, initial_eye_landmarks, patch_experts, sim_ref_to_img
             )
 
             # Run RIGID phase first (like C++)
             for iteration in range(self.max_iterations):
-                # Eye_8 trace: iteration header
-                if side == 'left' and window_idx == 0 and hasattr(self, '_eye8_trace_file'):
-                    with open(self._eye8_trace_file, 'a') as f:
-                        f.write(f"\n--- RIGID Iteration {iteration} ---\n")
-
                 # Compute mean-shift using precomputed response maps and offset tracking
                 # Pass sim_img_to_ref to transform offsets to reference space (like C++)
                 mean_shift = self._compute_eye_mean_shift_with_offset(
                     eye_landmarks, initial_eye_landmarks, response_maps, patch_experts,
                     sim_img_to_ref
                 )
-
-                # DEBUG: Save raw mean-shifts before transformation
-                raw_mean_shift = mean_shift.copy()
 
                 # Transform mean-shifts from reference space to image space (like C++)
                 # C++: mean_shifts_2D = mean_shifts_2D * cv::Mat(sim_ref_to_img).t()
@@ -719,74 +649,17 @@ class HierarchicalEyeModel:
                 # Convert back to stacked format
                 mean_shift = np.concatenate([mean_shift_2D[:, 0], mean_shift_2D[:, 1]])
 
-                # Eye_8 trace: transformed mean-shift
-                # STACKED format: mean_shift[lm_idx] = x, mean_shift[lm_idx + n_points] = y
-                if side == 'left' and window_idx == 0 and hasattr(self, '_eye8_trace_file'):
-                    with open(self._eye8_trace_file, 'a') as f:
-                        f.write(f"Transformed mean-shift Eye_8 (image): ({mean_shift[8]:.6f}, {mean_shift[8 + 28]:.6f})\n")
-
-                # DEBUG: Output first RIGID iteration (only for first window)
-                if iteration == 0 and side == 'left' and window_idx == 0:
-                    with open('/tmp/python_eye_raw_meanshift.txt', 'w') as f:
-                        f.write(f"=== Raw Mean-Shifts BEFORE Transform (Iter 0 WS={window_size}) ===\n")
-                        # STACKED format: [lm_idx] = x, [lm_idx + 28] = y
-                        f.write(f"Eye_8 raw ms: ({raw_mean_shift[8]:.6f}, {raw_mean_shift[8 + 28]:.6f})\n")
-                        f.write(f"Eye_8 transformed ms: ({mean_shift[8]:.6f}, {mean_shift[8 + 28]:.6f})\n\n")
-                        f.write(f"Response map for Eye_8:\n")
-                        if 8 in response_maps:
-                            rm = response_maps[8]
-                            f.write(f"  Shape: {rm.shape}\n")
-                            f.write(f"  Min: {rm.min():.6f}, Max: {rm.max():.6f}\n")
-                            # Find peak position
-                            peak_idx = np.unravel_index(np.argmax(rm), rm.shape)
-                            f.write(f"  Peak position: row={peak_idx[0]}, col={peak_idx[1]}\n")
-                            center = (rm.shape[0] - 1) / 2.0
-                            f.write(f"  Center: {center}\n")
-                            f.write(f"  Peak offset: dx={peak_idx[1] - center:.2f}, dy={peak_idx[0] - center:.2f}\n")
-
-                if iteration == 0 and side == 'left' and window_idx == 0:
-                    with open('/tmp/python_eye_rigid_iter0.txt', 'w') as f:
-                        f.write(f"=== RIGID Iteration 0 (WS={window_size}) ===\n")
-                        f.write(f"Eye_8 position: ({eye_landmarks[8, 0]:.2f}, {eye_landmarks[8, 1]:.2f})\n\n")
-                        if 8 in response_maps:
-                            rm = response_maps[8]
-                            f.write(f"Eye_8 response map:\n")
-                            for row in range(rm.shape[0]):
-                                f.write("  ")
-                                for col in range(rm.shape[1]):
-                                    f.write(f"{rm[row, col]:.4f} ")
-                                f.write("\n")
-                        # STACKED format: [lm_idx] = x, [lm_idx + 28] = y
-                        f.write(f"\nEye_8 mean-shift: ({mean_shift[8]:.6f}, {mean_shift[8 + 28]:.6f})\n")
-
                 # Solve for rigid-only parameter update
                 delta_p = self._solve_eye_update_rigid(
                     pdm, params, mean_shift
                 )
 
-                # DEBUG: Log parameter update for RIGID phase
-                if side == 'left' and window_idx == 0:
-                    with open('/tmp/python_eye_model_detailed.txt', 'a') as f:
-                        f.write(f"\nRIGID Iteration {iteration} parameter update:\n")
-                        f.write(f"  delta_scale: {delta_p[0]:.6f}\n")
-                        f.write(f"  delta_rot: ({delta_p[1]:.6f}, {delta_p[2]:.6f}, {delta_p[3]:.6f})\n")
-                        f.write(f"  delta_tx: {delta_p[4]:.6f}\n")
-                        f.write(f"  delta_ty: {delta_p[5]:.6f}\n")
-
                 # Apply update
-                old_eye8_pos = eye_landmarks[8].copy()
                 params = pdm.update_params(params, delta_p)
                 params = pdm.clamp_params(params)
 
                 # Update landmarks
                 eye_landmarks = pdm.params_to_landmarks_2d(params)
-
-                # Eye_8 trace: position change
-                if side == 'left' and window_idx == 0 and hasattr(self, '_eye8_trace_file'):
-                    delta_eye8 = eye_landmarks[8] - old_eye8_pos
-                    with open(self._eye8_trace_file, 'a') as f:
-                        f.write(f"Eye_8 position: ({eye_landmarks[8, 0]:.6f}, {eye_landmarks[8, 1]:.6f})\n")
-                        f.write(f"Eye_8 delta: ({delta_eye8[0]:.6f}, {delta_eye8[1]:.6f})\n")
 
                 # Track iteration if requested
                 if track_iterations:
@@ -808,12 +681,6 @@ class HierarchicalEyeModel:
                 if np.linalg.norm(delta_p) < 0.01:
                     break
 
-            # DEBUG: Log after rigid phase
-            if side == 'left':
-                with open('/tmp/python_eye_model_detailed.txt', 'a') as f:
-                    f.write(f"\n--- After RIGID phase WS={window_size} ({iteration + 1} iterations) ---\n")
-                    f.write(f"Global params: scale={params[0]:.6f} rot=({params[1]:.6f},{params[2]:.6f},{params[3]:.6f}) tx={params[4]:.6f} ty={params[5]:.6f}\n")
-
             # CRITICAL FIX: C++ uses SAME response maps for both RIGID and NONRIGID phases
             # DO NOT recompute response maps here - use initial_eye_landmarks as base
             # Response maps were computed ONCE at start of this window_size
@@ -827,9 +694,6 @@ class HierarchicalEyeModel:
                     sim_img_to_ref
                 )
 
-                # DEBUG: Capture raw mean-shift before transformation for NONRIGID
-                raw_nonrigid_ms = mean_shift.copy()
-
                 # Transform mean-shifts from reference space to image space (like C++)
                 # Use SAME transform as RIGID phase (sim_ref_to_img, not sim_ref_to_img_nr)
                 # Convert stacked format to (n, 2) for transformation
@@ -840,42 +704,6 @@ class HierarchicalEyeModel:
                 mean_shift_2D = mean_shift_2D @ sim_ref_to_img.T
                 # Convert back to stacked format
                 mean_shift = np.concatenate([mean_shift_2D[:, 0], mean_shift_2D[:, 1]])
-
-                # DEBUG: First NONRIGID iteration details
-                if iteration == 0 and side == 'left' and window_idx == 0:
-                    offset_x = eye_landmarks[8, 0] - initial_eye_landmarks[8, 0]
-                    offset_y = eye_landmarks[8, 1] - initial_eye_landmarks[8, 1]
-                    # Compute offset in reference space
-                    offset_ref_x = offset_x * sim_img_to_ref[0, 0] + offset_y * sim_img_to_ref[1, 0]
-                    offset_ref_y = offset_x * sim_img_to_ref[0, 1] + offset_y * sim_img_to_ref[1, 1]
-                    with open('/tmp/python_eye_nonrigid_debug.txt', 'w') as f:
-                        f.write(f"=== NONRIGID Iteration 0 Debug (WS={window_size}) ===\n")
-                        f.write(f"initial_eye_landmarks Eye_8: ({initial_eye_landmarks[8, 0]:.4f}, {initial_eye_landmarks[8, 1]:.4f})\n")
-                        f.write(f"eye_landmarks Eye_8: ({eye_landmarks[8, 0]:.4f}, {eye_landmarks[8, 1]:.4f})\n")
-                        f.write(f"Offset in IMAGE space: ({offset_x:.4f}, {offset_y:.4f})\n")
-                        f.write(f"Offset in REFERENCE space: ({offset_ref_x:.4f}, {offset_ref_y:.4f})\n")
-                        f.write(f"dx, dy in response map: ({offset_ref_x + 1.0:.4f}, {offset_ref_y + 1.0:.4f})\n")
-                        # STACKED format: [lm_idx] = x, [lm_idx + 28] = y
-                        f.write(f"\nRaw mean-shift Eye_8: ({raw_nonrigid_ms[8]:.6f}, {raw_nonrigid_ms[8 + 28]:.6f})\n")
-                        f.write(f"Transformed mean-shift Eye_8: ({mean_shift[8]:.6f}, {mean_shift[8 + 28]:.6f})\n")
-                        f.write(f"\nsim_img_to_ref:\n")
-                        f.write(f"  [{sim_img_to_ref[0,0]:.6f}, {sim_img_to_ref[0,1]:.6f}]\n")
-                        f.write(f"  [{sim_img_to_ref[1,0]:.6f}, {sim_img_to_ref[1,1]:.6f}]\n")
-                        f.write(f"\nsim_ref_to_img:\n")
-                        f.write(f"  [{sim_ref_to_img[0,0]:.6f}, {sim_ref_to_img[0,1]:.6f}]\n")
-                        f.write(f"  [{sim_ref_to_img[1,0]:.6f}, {sim_ref_to_img[1,1]:.6f}]\n")
-
-                # DEBUG: Log mean-shifts for eye model (first window only)
-                if side == 'left' and iteration < 2 and window_idx == 0:
-                    with open('/tmp/python_eye_model_detailed.txt', 'a') as f:
-                        f.write(f"\nIteration {iteration} (NONRIGID WS={window_size}):\n")
-                        f.write("Mean-shifts (all 28 landmarks):\n")
-                        # STACKED format: [lm_idx] = x, [lm_idx + 28] = y
-                        for i in range(28):
-                            ms_x = mean_shift[i]
-                            ms_y = mean_shift[i + 28]
-                            mag = np.sqrt(ms_x**2 + ms_y**2)
-                            f.write(f"  {i}: ms=({ms_x:.6f}, {ms_y:.6f}) mag={mag:.6f}\n")
 
                 # Solve for parameter update
                 delta_p = self._solve_eye_update(
@@ -909,32 +737,11 @@ class HierarchicalEyeModel:
                 if np.linalg.norm(delta_p) < 0.01:
                     break
 
-            # DEBUG: Log after nonrigid phase
-            if side == 'left':
-                with open('/tmp/python_eye_model_detailed.txt', 'a') as f:
-                    f.write(f"\n--- After NONRIGID phase WS={window_size} ({iteration + 1} iterations) ---\n")
-                    f.write("Updated mapped eyelid landmarks:\n")
-                    for i in [8, 10, 12, 14, 16, 18]:
-                        f.write(f"  Eye_{i}: ({eye_landmarks[i, 0]:.4f}, {eye_landmarks[i, 1]:.4f})\n")
-
         # Update only the mapped landmarks in the main model
         # Scale landmarks back to original image coordinates
         refined_main = main_landmarks.copy()
         for main_idx, eye_idx in mapping.items():
             refined_main[main_idx] = eye_landmarks[eye_idx] / scale_factor
-
-        # DEBUG: Save post-refinement eye landmarks
-        if side == 'left':  # Only debug left eye to avoid duplicate output
-            with open('/tmp/python_eye_model_debug.txt', 'a') as f:
-                f.write(f"\nPost-refinement eye landmarks ({iteration + 1} iterations):\n")
-                for i in main_indices:
-                    f.write(f"  {i}: ({refined_main[i, 0]:.4f}, {refined_main[i, 1]:.4f})\n")
-                f.write("\nRefinement change:\n")
-                for i in main_indices:
-                    dx = refined_main[i, 0] - main_landmarks[i, 0]
-                    dy = refined_main[i, 1] - main_landmarks[i, 1]
-                    mag = np.sqrt(dx**2 + dy**2)
-                    f.write(f"  {i}: delta=({dx:.4f}, {dy:.4f}) mag={mag:.4f}\n")
 
         if track_iterations:
             return refined_main, iteration_history
@@ -1045,45 +852,11 @@ class HierarchicalEyeModel:
                 flags=cv2.WARP_INVERSE_MAP + cv2.INTER_LINEAR
             )
 
-            # DEBUG: Output AOI values for Eye_8 comparison with C++
-            # Only save for LEFT eye (lower X position) and window_size=3
-            if lm_idx == 8 and hasattr(self, '_eye8_trace_file') and ws == 3:
-                with open('/tmp/python_eye8_aoi.txt', 'w') as f:
-                    f.write(f"=== Python Eye_8 AOI Debug ===\n")
-                    f.write(f"Landmark position: ({x:.4f}, {y:.4f})\n")
-                    f.write(f"a1={a1:.6f}, b1={b1:.6f}\n")
-                    f.write(f"aoi_size={aoi_size}, half_aoi={half_aoi:.4f}\n")
-                    f.write(f"tx={tx:.4f}, ty={ty:.4f}\n")
-                    f.write(f"\nAOI values ({aoi_size}x{aoi_size}):\n")
-                    for row in range(aoi_size):
-                        f.write("  ")
-                        for col in range(aoi_size):
-                            f.write(f"{area_of_interest[row, col]:.1f} ")
-                        f.write("\n")
-
             # Compute response map by sliding patch across area of interest
             # Response dimensions: aoi_size - patch_size + 1 = ws
             response_map = self._compute_ccnf_response_map(area_of_interest, patch_expert, landmark_idx=lm_idx)
 
             response_maps[lm_idx] = response_map
-
-        # DEBUG: Output response maps for comparison with C++ (always save for debugging)
-        # Include landmarks 0, 1 to debug mean-shift direction mismatch
-        debug_landmarks = [0, 1, 8, 10, 12, 14, 16, 18]
-        if True:  # Always save for now
-            with open('/tmp/python_eye_response_maps.txt', 'w') as f:
-                for lm_idx in debug_landmarks:
-                    if lm_idx in response_maps:
-                        rm = response_maps[lm_idx]
-                        f.write(f"Eye landmark {lm_idx} response map:\n")
-                        f.write(f"  min: {rm.min():.6f}, max: {rm.max():.6f}, mean: {rm.mean():.6f}\n")
-                        f.write(f"  {rm.shape[0]}x{rm.shape[1]} response map:\n")
-                        for row in range(rm.shape[0]):
-                            f.write("      ")
-                            for col in range(rm.shape[1]):
-                                f.write(f"{rm[row, col]:.4f}   ")
-                            f.write("\n")
-                        f.write("\n")
 
         return response_maps
 
@@ -1654,35 +1427,6 @@ class HierarchicalEyeModel:
             # Update parameters
             params = pdm.update_params(params, param_update)
             params = pdm.clamp_params(params)
-
-        # DEBUG: Output initialization in same format as C++
-        if side == 'left':
-            with open('/tmp/python_eye_init_debug.txt', 'w') as f:
-                f.write(f"=== Eye Model Initialization (Python) ===\n")
-                f.write(f"Model name: {side}_eye_28\n")
-                f.write(f"n_part_points: {pdm.n_points}\n\n")
-
-                f.write("Mappings (main -> eye):\n")
-                for main_idx, eye_idx in mapping.items():
-                    f.write(f"  {main_idx} -> {eye_idx}\n")
-
-                f.write("\nInput landmarks (part_model_locs):\n")
-                for i, (main_idx, eye_idx) in enumerate(mapping.items()):
-                    f.write(f"  Eye_{eye_idx}: ({target_points[i, 0]:.4f}, {target_points[i, 1]:.4f})\n")
-
-                f.write("\nFitted params_global:\n")
-                f.write(f"  scale: {params[0]:.6f}\n")
-                f.write(f"  rot: ({params[1]:.6f}, {params[2]:.6f}, {params[3]:.6f})\n")
-                f.write(f"  tx, ty: ({params[4]:.6f}, {params[5]:.6f})\n")
-
-                f.write("\nFirst 5 local params:\n")
-                for i in range(min(5, pdm.n_modes)):
-                    f.write(f"  p[{i}]: {params[6+i]:.6f}\n")
-
-                f.write("\nInitial 28 eye landmarks:\n")
-                initial_lm = pdm.params_to_landmarks_2d(params)
-                for i in range(28):
-                    f.write(f"  {i}: ({initial_lm[i, 0]:.4f}, {initial_lm[i, 1]:.4f})\n")
 
         return params
 
