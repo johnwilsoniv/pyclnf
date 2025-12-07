@@ -151,9 +151,10 @@ class PDM:
         FIXED: Now uses analytical rotation derivatives matching OpenFace's
         small-angle approximation (R * R') instead of numerical differentiation.
 
-        The Jacobian J has shape (2*n_points, n_params) where:
-            J[2*i, j] = ∂(landmark_i.x) / ∂param_j
-            J[2*i+1, j] = ∂(landmark_i.y) / ∂param_j
+        The Jacobian J has shape (2*n_points, n_params) in STACKED format
+        matching OpenFace C++:
+            J[i, j] = ∂(landmark_i.x) / ∂param_j      for i = 0 to n-1
+            J[i+n, j] = ∂(landmark_i.y) / ∂param_j    for i = 0 to n-1
 
         This is used in the NU-RLMS optimization update step.
 
@@ -207,8 +208,9 @@ class PDM:
         # 1. Derivative w.r.t. scale (column 0)
         # ∂x/∂s = (X·r11 + Y·r12 + Z·r13)
         # ∂y/∂s = (X·r21 + Y·r22 + Z·r23)
-        J[0::2, 0] = X * r11 + Y * r12 + Z * r13  # x components
-        J[1::2, 0] = X * r21 + Y * r22 + Z * r23  # y components
+        # STACKED format: rows 0:n = x, rows n:2n = y
+        J[:n, 0] = X * r11 + Y * r12 + Z * r13  # x components (rows 0 to n-1)
+        J[n:, 0] = X * r21 + Y * r22 + Z * r23  # y components (rows n to 2n-1)
 
         # 2. Derivative w.r.t. rotation (columns 1-3) - ANALYTICAL FORMULAS
         # These come from the small-angle approximation: R * R'
@@ -219,25 +221,25 @@ class PDM:
         # Rotation around X-axis (pitch) - column 1
         # ∂x/∂wx = s * (Y·r13 - Z·r12)
         # ∂y/∂wx = s * (Y·r23 - Z·r22)
-        J[0::2, 1] = s * (Y * r13 - Z * r12)
-        J[1::2, 1] = s * (Y * r23 - Z * r22)
+        J[:n, 1] = s * (Y * r13 - Z * r12)
+        J[n:, 1] = s * (Y * r23 - Z * r22)
 
         # Rotation around Y-axis (yaw) - column 2
         # ∂x/∂wy = -s * (X·r13 - Z·r11)
         # ∂y/∂wy = -s * (X·r23 - Z·r21)
-        J[0::2, 2] = -s * (X * r13 - Z * r11)
-        J[1::2, 2] = -s * (X * r23 - Z * r21)
+        J[:n, 2] = -s * (X * r13 - Z * r11)
+        J[n:, 2] = -s * (X * r23 - Z * r21)
 
         # Rotation around Z-axis (roll) - column 3
         # ∂x/∂wz = s * (X·r12 - Y·r11)
         # ∂y/∂wz = s * (X·r22 - Y·r21)
-        J[0::2, 3] = s * (X * r12 - Y * r11)
-        J[1::2, 3] = s * (X * r22 - Y * r21)
+        J[:n, 3] = s * (X * r12 - Y * r11)
+        J[n:, 3] = s * (X * r22 - Y * r21)
 
         # 3. Derivative w.r.t. translation (columns 4-5)
         # ∂x/∂tx = 1, ∂y/∂ty = 1
-        J[0::2, 4] = 1.0  # ∂x/∂tx = 1
-        J[1::2, 5] = 1.0  # ∂y/∂ty = 1
+        J[:n, 4] = 1.0  # ∂x/∂tx = 1
+        J[n:, 5] = 1.0  # ∂y/∂ty = 1
 
         # ==================================================================
         # NON-RIGID SHAPE PARAMETER DERIVATIVES (OpenFace PDM.cpp lines 414-420)
@@ -254,9 +256,9 @@ class PDM:
             phi_y = phi_i[n:2*n]
             phi_z = phi_i[2*n:3*n]
 
-            # Compute derivatives
-            J[0::2, 6 + i] = s * (r11 * phi_x + r12 * phi_y + r13 * phi_z)
-            J[1::2, 6 + i] = s * (r21 * phi_x + r22 * phi_y + r23 * phi_z)
+            # Compute derivatives (STACKED format)
+            J[:n, 6 + i] = s * (r11 * phi_x + r12 * phi_y + r13 * phi_z)
+            J[n:, 6 + i] = s * (r21 * phi_x + r22 * phi_y + r23 * phi_z)
 
         return J
 
@@ -375,25 +377,35 @@ class PDM:
 
     def _apply_mtcnn_bbox_preprocessing(self, bbox: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
         """
-        Apply MTCNN-style bbox preprocessing to match C++ OpenFace initialization.
+        Apply MTCNN-style bbox correction to match C++ OpenFace initialization.
 
-        NOTE: C++ OpenFace runs MTCNN detection even when a manual bbox is provided.
-        The MTCNN detector outputs a bbox with:
-        1. Square aspect ratio (rectify)
-        2. Landmark-tightening corrections from ONet regression
+        C++ OpenFace applies a calibration transform to MTCNN bboxes to make them
+        "tight around facial landmarks" before using them for CLNF initialization.
 
-        For Python to match C++ initialization, we need to apply equivalent preprocessing.
+        From FaceDetectorMTCNN.cpp lines 1496-1499:
+            x = width * -0.0075 + x
+            y = height * 0.2459 + y
+            width = 1.0323 * width
+            height = 0.7751 * height
+
+        This correction shifts the bbox down and makes it shorter (less forehead,
+        tighter around the face).
 
         Args:
-            bbox: Raw bbox [x, y, width, height] from detector
+            bbox: Raw bbox [x, y, width, height] from MTCNN detector
 
         Returns:
-            bbox: Preprocessed [x, y, width, height]
+            bbox: Corrected [x, y, width, height] for CLNF initialization
         """
-        # For now, return bbox as-is since applying MTCNN corrections
-        # without full MTCNN detection doesn't match C++ behavior
-        # TODO: Either run MTCNN in Python, or accept the small initialization difference
-        return bbox
+        x, y, w, h = bbox
+
+        # Apply C++ OpenFace MTCNN bbox correction
+        corrected_x = w * -0.0075 + x
+        corrected_y = h * 0.2459 + y
+        corrected_w = 1.0323 * w
+        corrected_h = 0.7751 * h
+
+        return (corrected_x, corrected_y, corrected_w, corrected_h)
 
     def init_params(self, bbox: Optional[Tuple[float, float, float, float]] = None) -> np.ndarray:
         """
@@ -467,6 +479,421 @@ class PDM:
 
         # Shape parameters = 0 (mean shape)
         params[6:] = 0.0
+
+        return params
+
+    def init_params_from_5pt(self, bbox: Tuple[float, float, float, float],
+                              landmarks_5pt: np.ndarray) -> np.ndarray:
+        """
+        Initialize parameters from bbox AND 5-point MTCNN landmarks.
+
+        C++ OpenFace behavior (from code analysis):
+        1. CalcParams(bbox) - uses bbox to compute initial scale/translation
+        2. Multi-hypothesis testing happens at CLNF level, NOT PDM level
+        3. The 11 hypotheses test different YAW rotations, not pitch
+        4. Each hypothesis runs full CLNF detection with response maps
+        5. Best hypothesis selected by model likelihood
+
+        The 5-point MTCNN landmarks are NOT directly fitted via CalcParams.
+        They just provide the bounding box for initialization.
+
+        Note: Multi-hypothesis testing should be implemented at the CLNF.fit()
+        level, not here at PDM initialization.
+
+        Args:
+            bbox: Bounding box [x, y, width, height]
+            landmarks_5pt: 5-point landmarks from MTCNN, shape (5, 2)
+                          (currently not used for fitting, just provides bbox context)
+
+        Returns:
+            params: Initial parameter vector (bbox-based initialization)
+        """
+        # C++ uses CalcParams(bbox, params_local, rotation_hypothesis)
+        # The rotation comes from multi-hypothesis testing at CLNF level
+        # For initial PDM params, just use bbox initialization
+        return self.init_params(bbox)
+
+    def calc_params_from_landmarks(self, landmarks_2d: np.ndarray,
+                                    params_init: np.ndarray,
+                                    landmark_indices: list = None,
+                                    max_iters: int = 100,
+                                    damping: float = 0.75,
+                                    convergence_thresh: float = 0.001) -> np.ndarray:
+        """
+        Iterative Gauss-Newton optimization matching C++ PDM::CalcParams.
+
+        This is the core optimization that fits PDM parameters to observed 2D landmarks.
+        It matches OpenFace PDM.cpp lines 525-763.
+
+        Key implementation details from C++:
+        - Damping factor: 0.75 (controls step size)
+        - Regularization: Only on shape params (indices 6-39), weighted by 1/eigenvalues
+        - Convergence: 3 consecutive iterations with <0.1% improvement
+        - Jacobian format: STACKED [x0..xn, y0..yn]
+
+        Args:
+            landmarks_2d: Observed 2D landmarks, shape (N, 2) where N is number of points
+            params_init: Initial parameter estimate [s, wx, wy, wz, tx, ty, q0..q33]
+            landmark_indices: Which PDM landmarks to use (indices into 68-point model).
+                             If None, uses all 68 landmarks.
+            max_iters: Maximum iterations (C++ uses 100)
+            damping: Step size damping factor (C++ uses 0.75)
+            convergence_thresh: Convergence threshold (C++ uses 0.001 = 0.1%)
+
+        Returns:
+            Optimized parameters
+        """
+        params = params_init.copy().flatten().astype(np.float64)
+
+        # Determine which landmarks to use
+        if landmark_indices is None:
+            landmark_indices = list(range(self.n_points))
+
+        n_landmarks = len(landmark_indices)
+
+        # Target landmarks in STACKED format [x0..xn, y0..yn]
+        target_stacked = np.concatenate([
+            landmarks_2d[:, 0],
+            landmarks_2d[:, 1]
+        ]).astype(np.float64)
+
+        # Track consecutive small improvements for convergence
+        consecutive_small_improvements = 0
+        prev_error = np.inf
+
+        for iteration in range(max_iters):
+            # Get current 2D landmarks for the subset
+            all_landmarks_2d = self.params_to_landmarks_2d(params)
+            current_landmarks = all_landmarks_2d[landmark_indices]
+
+            # Current landmarks in STACKED format
+            current_stacked = np.concatenate([
+                current_landmarks[:, 0],
+                current_landmarks[:, 1]
+            ])
+
+            # Compute residual: r = target - current
+            residual = target_stacked - current_stacked
+
+            # Current error (sum of squared residuals)
+            current_error = np.sum(residual ** 2)
+
+            # Check convergence based on error improvement
+            if prev_error < np.inf:
+                improvement = (prev_error - current_error) / (prev_error + 1e-10)
+                if improvement < convergence_thresh:
+                    consecutive_small_improvements += 1
+                    if consecutive_small_improvements >= 3:
+                        break
+                else:
+                    consecutive_small_improvements = 0
+
+            prev_error = current_error
+
+            # Compute full Jacobian and extract subset
+            J_full = self.compute_jacobian(params)  # (2*68, 40)
+
+            # Extract rows for the landmark subset (STACKED format)
+            # Rows 0:68 are x derivatives, rows 68:136 are y derivatives
+            x_indices = landmark_indices
+            y_indices = [i + self.n_points for i in landmark_indices]
+            row_indices = x_indices + y_indices
+
+            J = J_full[row_indices, :]  # (2*n_landmarks, 40)
+
+            # Build Hessian approximation: H = J^T @ J
+            JtJ = J.T @ J
+
+            # Add regularization for shape parameters only (indices 6:40)
+            # C++ uses eigenvalue-weighted regularization: 1/eigenvalue
+            H = JtJ.copy()
+            reg_weights = 1.0 / (self.eigen_values.flatten() + 1e-10)
+            H[6:, 6:] += np.diag(reg_weights)
+
+            # Compute gradient: g = J^T @ r
+            g = J.T @ residual
+
+            # Solve for parameter update: delta = H^(-1) @ g
+            try:
+                delta_p = np.linalg.solve(H, g)
+            except np.linalg.LinAlgError:
+                # Singular matrix - use pseudoinverse
+                delta_p = np.linalg.lstsq(H, g, rcond=None)[0]
+
+            # Apply damped update
+            delta_p_damped = damping * delta_p
+
+            # Update parameters using proper rotation composition
+            params = self.update_params(params, delta_p_damped)
+
+            # Clamp parameters to valid range
+            params = self.clamp_params(params, n_std=3.0)
+
+        return params
+
+    def _get_5pt_to_68pt_mapping(self) -> dict:
+        """
+        Get mapping from 5 MTCNN landmarks to 68-point PDM indices.
+
+        MTCNN 5-point landmarks:
+            0: left eye center
+            1: right eye center
+            2: nose tip
+            3: left mouth corner
+            4: right mouth corner
+
+        PDM 68-point correspondences:
+            left eye center: average of landmarks 36-41
+            right eye center: average of landmarks 42-47
+            nose tip: landmark 30
+            left mouth corner: landmark 48
+            right mouth corner: landmark 54
+
+        Returns:
+            Dictionary with:
+            - 'indices': list of PDM indices for each 5pt (6+6+1+1+1=15 total)
+            - 'weights': corresponding weights for averaging
+        """
+        return {
+            0: {'indices': [36, 37, 38, 39, 40, 41], 'weight': 1/6},  # left eye
+            1: {'indices': [42, 43, 44, 45, 46, 47], 'weight': 1/6},  # right eye
+            2: {'indices': [30], 'weight': 1.0},                      # nose
+            3: {'indices': [48], 'weight': 1.0},                      # left mouth
+            4: {'indices': [54], 'weight': 1.0},                      # right mouth
+        }
+
+    def _compute_5pt_from_68pt(self, landmarks_68: np.ndarray) -> np.ndarray:
+        """
+        Compute 5-point landmarks from 68-point landmarks.
+
+        Args:
+            landmarks_68: 68-point landmarks, shape (68, 2)
+
+        Returns:
+            5-point landmarks, shape (5, 2)
+        """
+        mapping = self._get_5pt_to_68pt_mapping()
+        landmarks_5pt = np.zeros((5, 2), dtype=np.float64)
+
+        for i in range(5):
+            indices = mapping[i]['indices']
+            landmarks_5pt[i] = np.mean(landmarks_68[indices], axis=0)
+
+        return landmarks_5pt
+
+    def init_params_multi_hypothesis(self, bbox: Tuple[float, float, float, float],
+                                      landmarks_5pt: np.ndarray,
+                                      n_hypotheses: int = 11) -> np.ndarray:
+        """
+        Test multiple rotation hypotheses and pick best by likelihood.
+
+        This matches C++ OpenFace behavior in LandmarkDetectorFunc.cpp lines 724-744.
+        C++ tests pitch (rotation around X-axis) in range [-0.5, 0.5] radians
+        with 11 candidates spaced ~0.1 radians apart (~5.7 degrees).
+
+        For each hypothesis:
+        1. Initialize params from bbox with candidate pitch
+        2. Run Gauss-Newton optimization to fit 5-point landmarks
+        3. Compute likelihood (negative sum of squared residuals)
+        4. Keep best hypothesis
+
+        Args:
+            bbox: Bounding box [x, y, width, height]
+            landmarks_5pt: 5-point MTCNN landmarks, shape (5, 2)
+            n_hypotheses: Number of rotation candidates (default 11)
+
+        Returns:
+            Best parameters by likelihood
+        """
+        # Get bbox-based initialization
+        params_bbox = self.init_params(bbox)
+
+        # Validate landmarks
+        if landmarks_5pt is None or landmarks_5pt.shape[0] != 5:
+            return params_bbox
+
+        landmarks_5pt = landmarks_5pt.astype(np.float64)
+
+        # Generate pitch candidates from -0.5 to 0.5 radians
+        # C++ uses: for(i = 0; i < multi_view_orientations.size(); i++)
+        # where multi_view_orientations = linspace(-0.5, 0.5, 11)
+        pitch_candidates = np.linspace(-0.5, 0.5, n_hypotheses)
+
+        best_params = params_bbox.copy()
+        best_likelihood = -np.inf
+
+        # PDM indices for 5-point landmarks
+        mapping = self._get_5pt_to_68pt_mapping()
+
+        for pitch in pitch_candidates:
+            # Initialize with candidate pitch
+            params_candidate = params_bbox.copy()
+            params_candidate[1] = pitch  # Set pitch (rotation around X-axis)
+
+            # Run Gauss-Newton to fit 5-point landmarks
+            # We need to build target landmarks for the subset
+            # For eye centers, we target the center of 6 landmarks
+            # For nose/mouth, we target single landmarks
+
+            # Create expanded target for the 15 landmarks that make up 5 points
+            # (6 left eye + 6 right eye + 1 nose + 1 left mouth + 1 right mouth)
+            target_indices = []
+            target_landmarks = []
+
+            for i in range(5):
+                indices = mapping[i]['indices']
+                for idx in indices:
+                    target_indices.append(idx)
+                    # For averaged points (eyes), each landmark targets the observed center
+                    target_landmarks.append(landmarks_5pt[i])
+
+            target_landmarks = np.array(target_landmarks)  # (15, 2)
+
+            # Optimize
+            params_optimized = self.calc_params_from_landmarks(
+                landmarks_2d=target_landmarks,
+                params_init=params_candidate,
+                landmark_indices=target_indices,
+                max_iters=100,
+                damping=0.75,
+                convergence_thresh=0.001
+            )
+
+            # Compute likelihood (negative sum of squared residuals)
+            all_landmarks_2d = self.params_to_landmarks_2d(params_optimized)
+            computed_5pt = self._compute_5pt_from_68pt(all_landmarks_2d)
+
+            residuals = landmarks_5pt - computed_5pt
+            likelihood = -np.sum(residuals ** 2)
+
+            if likelihood > best_likelihood:
+                best_likelihood = likelihood
+                best_params = params_optimized.copy()
+
+        return best_params
+
+    def _estimate_shape_from_5pt(self, params: np.ndarray, target_5pt: np.ndarray,
+                                  ref_5pt: np.ndarray) -> np.ndarray:
+        """
+        Estimate shape parameters from 5-point landmarks using regularized least squares.
+
+        Given the pose (scale, rotation, translation), finds shape parameters that
+        minimize the distance between projected PDM landmarks and observed MTCNN landmarks.
+
+        The problem is highly underdetermined (34 shape params from 10 coordinates),
+        so we use strong regularization based on PCA eigenvalues.
+
+        Args:
+            params: Current parameter vector (with pose estimated, shape=0)
+            target_5pt: Observed 5-point MTCNN landmarks, shape (5, 2)
+            ref_5pt: Reference 5-point positions in mean shape, shape (5, 3)
+
+        Returns:
+            params: Updated parameter vector with estimated shape params
+        """
+        # Indices in the 68-point model corresponding to 5-point landmarks
+        # We'll use a weighted combination for eye centers
+        pdm_indices = {
+            'left_eye': [36, 37, 38, 39, 40, 41],   # Average these for center
+            'right_eye': [42, 43, 44, 45, 46, 47],  # Average these for center
+            'nose': [30],
+            'left_mouth': [48],
+            'right_mouth': [54]
+        }
+
+        # Get current pose parameters
+        scale = params[0]
+        rotation = params[1:4]
+        tx, ty = params[4], params[5]
+
+        # Compute rotation matrix
+        R = cv2.Rodrigues(rotation.astype(np.float64))[0]
+
+        # Get mean shape in 3D (68, 3)
+        mean_3d = self.mean_shape.reshape(3, -1).T
+
+        # Get principal components (3*68, n_modes) -> reshaped to (68, 3, n_modes)
+        princ_3d = self.princ_comp.reshape(3, -1, self.n_modes)  # (3, 68, n_modes)
+        princ_3d = np.transpose(princ_3d, (1, 0, 2))  # (68, 3, n_modes)
+
+        # Build the Jacobian for 5 landmark points w.r.t. shape parameters
+        # For each of the 5 points, we need ∂(x_2d, y_2d) / ∂q_j
+        # where q_j are shape parameters
+
+        J_shape = np.zeros((10, self.n_modes))  # 10 coords (5 points x 2)
+        target_vec = np.zeros(10)
+        current_vec = np.zeros(10)
+
+        point_idx = 0
+        for i, (name, indices) in enumerate(pdm_indices.items()):
+            # Target 2D position from MTCNN
+            target_2d = target_5pt[i]
+
+            # Current 2D position from mean shape + pose
+            if len(indices) > 1:
+                # Average for eye center
+                mean_pts_3d = mean_3d[indices].mean(axis=0)
+                princ_pts_3d = princ_3d[indices].mean(axis=0)  # (3, n_modes)
+            else:
+                mean_pts_3d = mean_3d[indices[0]]
+                princ_pts_3d = princ_3d[indices[0]]  # (3, n_modes)
+
+            # Project mean point to 2D
+            rotated_mean = R @ mean_pts_3d
+            current_2d = np.array([
+                scale * rotated_mean[0] + tx,
+                scale * rotated_mean[1] + ty
+            ])
+
+            # Compute Jacobian: ∂(x, y) / ∂q_j = scale * R @ (∂shape_3d / ∂q_j)
+            # ∂shape_3d / ∂q_j = princ_comp[:, j] (the j-th principal component)
+            for j in range(self.n_modes):
+                pc_j = princ_pts_3d[:, j]  # 3D displacement for j-th shape param
+                rotated_pc = R @ pc_j
+                J_shape[point_idx * 2, j] = scale * rotated_pc[0]      # ∂x/∂q_j
+                J_shape[point_idx * 2 + 1, j] = scale * rotated_pc[1]  # ∂y/∂q_j
+
+            # Store target and current positions
+            target_vec[point_idx * 2] = target_2d[0]
+            target_vec[point_idx * 2 + 1] = target_2d[1]
+            current_vec[point_idx * 2] = current_2d[0]
+            current_vec[point_idx * 2 + 1] = current_2d[1]
+
+            point_idx += 1
+
+        # Residual: difference between target and current
+        residual = target_vec - current_vec
+
+        # Solve regularized least squares: min ||J @ q - r||^2 + λ * ||D @ q||^2
+        # where D = diag(1/sqrt(eigenvalues)) to penalize low-variance modes
+        # This is equivalent to: (J^T J + λ D^T D) q = J^T r
+
+        JtJ = J_shape.T @ J_shape
+
+        # Strong regularization using eigenvalues
+        # Penalize deviations from mean shape proportional to 1/eigenvalue
+        # This is the Mahalanobis distance penalty
+        reg_strength = 10.0  # Strong regularization since we only have 5 points
+        reg_diag = reg_strength / (self.eigen_values.flatten() + 1e-6)
+        reg_matrix = np.diag(reg_diag)
+
+        # Solve (J^T J + reg) q = J^T r
+        A = JtJ + reg_matrix
+        b = J_shape.T @ residual
+
+        try:
+            shape_params = np.linalg.solve(A, b)
+        except np.linalg.LinAlgError:
+            # Fallback to pseudoinverse
+            shape_params = np.linalg.lstsq(A, b, rcond=None)[0]
+
+        # Clamp to valid range (±3 std)
+        std_devs = np.sqrt(self.eigen_values.flatten())
+        shape_params = np.clip(shape_params, -3 * std_devs, 3 * std_devs)
+
+        # Update params
+        params = params.copy()
+        params[6:] = shape_params
 
         return params
 
@@ -753,14 +1180,17 @@ class PDM:
         """
         params = current_params.copy().flatten()
 
-        # Target landmarks as flattened vector [x0, y0, x1, y1, ...]
-        target = landmarks_2d.flatten().astype(np.float64)
+        # Target landmarks in STACKED format [x0, x1, ..., x_n, y0, y1, ..., y_n]
+        # to match Jacobian format (rows 0:n = x derivatives, rows n:2n = y derivatives)
+        n = landmarks_2d.shape[0]
+        target = np.concatenate([landmarks_2d[:, 0], landmarks_2d[:, 1]]).astype(np.float64)
 
         for iteration in range(max_iter):
-            # Get current 2D landmarks
-            current_2d = self.params_to_landmarks_2d(params).flatten()
+            # Get current 2D landmarks in STACKED format
+            current_2d_xy = self.params_to_landmarks_2d(params)
+            current_2d = np.concatenate([current_2d_xy[:, 0], current_2d_xy[:, 1]])
 
-            # Compute residual
+            # Compute residual (both in stacked format now)
             residual = target - current_2d
 
             # Compute Jacobian

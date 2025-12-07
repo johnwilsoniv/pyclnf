@@ -116,6 +116,10 @@ class EyePDM:
         """
         Compute Jacobian matrix of 2D landmarks with respect to parameters.
 
+        Uses STACKED format matching OpenFace C++:
+            J[i, j] = ∂(landmark_i.x) / ∂param_j      for i = 0 to n-1
+            J[i+n, j] = ∂(landmark_i.y) / ∂param_j    for i = 0 to n-1
+
         Args:
             params: Parameter vector
 
@@ -148,23 +152,23 @@ class EyePDM:
         # Initialize Jacobian
         J = np.zeros((2 * self.n_points, self.n_params))
 
-        # 1. Derivative w.r.t. scale (column 0)
-        J[0::2, 0] = X * r11 + Y * r12 + Z * r13
-        J[1::2, 0] = X * r21 + Y * r22 + Z * r23
+        # 1. Derivative w.r.t. scale (column 0) - STACKED format
+        J[:n, 0] = X * r11 + Y * r12 + Z * r13
+        J[n:, 0] = X * r21 + Y * r22 + Z * r23
 
         # 2. Derivative w.r.t. rotation (columns 1-3)
-        J[0::2, 1] = s * (Y * r13 - Z * r12)
-        J[1::2, 1] = s * (Y * r23 - Z * r22)
+        J[:n, 1] = s * (Y * r13 - Z * r12)
+        J[n:, 1] = s * (Y * r23 - Z * r22)
 
-        J[0::2, 2] = -s * (X * r13 - Z * r11)
-        J[1::2, 2] = -s * (X * r23 - Z * r21)
+        J[:n, 2] = -s * (X * r13 - Z * r11)
+        J[n:, 2] = -s * (X * r23 - Z * r21)
 
-        J[0::2, 3] = s * (X * r12 - Y * r11)
-        J[1::2, 3] = s * (X * r22 - Y * r21)
+        J[:n, 3] = s * (X * r12 - Y * r11)
+        J[n:, 3] = s * (X * r22 - Y * r21)
 
         # 3. Derivative w.r.t. translation (columns 4-5)
-        J[0::2, 4] = 1.0
-        J[1::2, 5] = 1.0
+        J[:n, 4] = 1.0
+        J[n:, 5] = 1.0
 
         # 4. Derivative w.r.t. shape parameters (columns 6:)
         for i in range(self.n_modes):
@@ -173,8 +177,8 @@ class EyePDM:
             phi_y = phi_i[n:2*n]
             phi_z = phi_i[2*n:3*n]
 
-            J[0::2, 6 + i] = s * (r11 * phi_x + r12 * phi_y + r13 * phi_z)
-            J[1::2, 6 + i] = s * (r21 * phi_x + r22 * phi_y + r23 * phi_z)
+            J[:n, 6 + i] = s * (r11 * phi_x + r12 * phi_y + r13 * phi_z)
+            J[n:, 6 + i] = s * (r21 * phi_x + r22 * phi_y + r23 * phi_z)
 
         return J
 
