@@ -710,21 +710,28 @@ class HierarchicalEyeModel:
 
                 # Transform mean-shifts from reference space to image space (like C++)
                 # C++: mean_shifts_2D = mean_shifts_2D * cv::Mat(sim_ref_to_img).t()
-                mean_shift_2D = mean_shift.reshape(-1, 2)  # (28, 2)
+                # Convert stacked format to (n, 2) for transformation
+                n_eye = 28
+                ms_x = mean_shift[:n_eye]
+                ms_y = mean_shift[n_eye:]
+                mean_shift_2D = np.column_stack([ms_x, ms_y])  # (28, 2)
                 mean_shift_2D = mean_shift_2D @ sim_ref_to_img.T
-                mean_shift = mean_shift_2D.flatten()
+                # Convert back to stacked format
+                mean_shift = np.concatenate([mean_shift_2D[:, 0], mean_shift_2D[:, 1]])
 
                 # Eye_8 trace: transformed mean-shift
+                # STACKED format: mean_shift[lm_idx] = x, mean_shift[lm_idx + n_points] = y
                 if side == 'left' and window_idx == 0 and hasattr(self, '_eye8_trace_file'):
                     with open(self._eye8_trace_file, 'a') as f:
-                        f.write(f"Transformed mean-shift Eye_8 (image): ({mean_shift[16]:.6f}, {mean_shift[17]:.6f})\n")
+                        f.write(f"Transformed mean-shift Eye_8 (image): ({mean_shift[8]:.6f}, {mean_shift[8 + 28]:.6f})\n")
 
                 # DEBUG: Output first RIGID iteration (only for first window)
                 if iteration == 0 and side == 'left' and window_idx == 0:
                     with open('/tmp/python_eye_raw_meanshift.txt', 'w') as f:
                         f.write(f"=== Raw Mean-Shifts BEFORE Transform (Iter 0 WS={window_size}) ===\n")
-                        f.write(f"Eye_8 raw ms: ({raw_mean_shift[16]:.6f}, {raw_mean_shift[17]:.6f})\n")
-                        f.write(f"Eye_8 transformed ms: ({mean_shift[16]:.6f}, {mean_shift[17]:.6f})\n\n")
+                        # STACKED format: [lm_idx] = x, [lm_idx + 28] = y
+                        f.write(f"Eye_8 raw ms: ({raw_mean_shift[8]:.6f}, {raw_mean_shift[8 + 28]:.6f})\n")
+                        f.write(f"Eye_8 transformed ms: ({mean_shift[8]:.6f}, {mean_shift[8 + 28]:.6f})\n\n")
                         f.write(f"Response map for Eye_8:\n")
                         if 8 in response_maps:
                             rm = response_maps[8]
@@ -749,7 +756,8 @@ class HierarchicalEyeModel:
                                 for col in range(rm.shape[1]):
                                     f.write(f"{rm[row, col]:.4f} ")
                                 f.write("\n")
-                        f.write(f"\nEye_8 mean-shift: ({mean_shift[16]:.6f}, {mean_shift[17]:.6f})\n")
+                        # STACKED format: [lm_idx] = x, [lm_idx + 28] = y
+                        f.write(f"\nEye_8 mean-shift: ({mean_shift[8]:.6f}, {mean_shift[8 + 28]:.6f})\n")
 
                 # Solve for rigid-only parameter update
                 delta_p = self._solve_eye_update_rigid(
@@ -824,9 +832,14 @@ class HierarchicalEyeModel:
 
                 # Transform mean-shifts from reference space to image space (like C++)
                 # Use SAME transform as RIGID phase (sim_ref_to_img, not sim_ref_to_img_nr)
-                mean_shift_2D = mean_shift.reshape(-1, 2)  # (28, 2)
+                # Convert stacked format to (n, 2) for transformation
+                n_eye = 28
+                ms_x = mean_shift[:n_eye]
+                ms_y = mean_shift[n_eye:]
+                mean_shift_2D = np.column_stack([ms_x, ms_y])  # (28, 2)
                 mean_shift_2D = mean_shift_2D @ sim_ref_to_img.T
-                mean_shift = mean_shift_2D.flatten()
+                # Convert back to stacked format
+                mean_shift = np.concatenate([mean_shift_2D[:, 0], mean_shift_2D[:, 1]])
 
                 # DEBUG: First NONRIGID iteration details
                 if iteration == 0 and side == 'left' and window_idx == 0:
@@ -842,8 +855,9 @@ class HierarchicalEyeModel:
                         f.write(f"Offset in IMAGE space: ({offset_x:.4f}, {offset_y:.4f})\n")
                         f.write(f"Offset in REFERENCE space: ({offset_ref_x:.4f}, {offset_ref_y:.4f})\n")
                         f.write(f"dx, dy in response map: ({offset_ref_x + 1.0:.4f}, {offset_ref_y + 1.0:.4f})\n")
-                        f.write(f"\nRaw mean-shift Eye_8: ({raw_nonrigid_ms[16]:.6f}, {raw_nonrigid_ms[17]:.6f})\n")
-                        f.write(f"Transformed mean-shift Eye_8: ({mean_shift[16]:.6f}, {mean_shift[17]:.6f})\n")
+                        # STACKED format: [lm_idx] = x, [lm_idx + 28] = y
+                        f.write(f"\nRaw mean-shift Eye_8: ({raw_nonrigid_ms[8]:.6f}, {raw_nonrigid_ms[8 + 28]:.6f})\n")
+                        f.write(f"Transformed mean-shift Eye_8: ({mean_shift[8]:.6f}, {mean_shift[8 + 28]:.6f})\n")
                         f.write(f"\nsim_img_to_ref:\n")
                         f.write(f"  [{sim_img_to_ref[0,0]:.6f}, {sim_img_to_ref[0,1]:.6f}]\n")
                         f.write(f"  [{sim_img_to_ref[1,0]:.6f}, {sim_img_to_ref[1,1]:.6f}]\n")
@@ -856,9 +870,10 @@ class HierarchicalEyeModel:
                     with open('/tmp/python_eye_model_detailed.txt', 'a') as f:
                         f.write(f"\nIteration {iteration} (NONRIGID WS={window_size}):\n")
                         f.write("Mean-shifts (all 28 landmarks):\n")
+                        # STACKED format: [lm_idx] = x, [lm_idx + 28] = y
                         for i in range(28):
-                            ms_x = mean_shift[2 * i]
-                            ms_y = mean_shift[2 * i + 1]
+                            ms_x = mean_shift[i]
+                            ms_y = mean_shift[i + 28]
                             mag = np.sqrt(ms_x**2 + ms_y**2)
                             f.write(f"  {i}: ms=({ms_x:.6f}, {ms_y:.6f}) mag={mag:.6f}\n")
 
@@ -1182,8 +1197,9 @@ class HierarchicalEyeModel:
                 ms_x = 0.0
                 ms_y = 0.0
 
-            mean_shift[2 * lm_idx] = ms_x
-            mean_shift[2 * lm_idx + 1] = ms_y
+            # STACKED format: [lm_idx] = x, [lm_idx + n_points] = y
+            mean_shift[lm_idx] = ms_x
+            mean_shift[lm_idx + n_points] = ms_y
 
         return mean_shift
 
@@ -1247,8 +1263,9 @@ class HierarchicalEyeModel:
                 ms_x = 0.0
                 ms_y = 0.0
 
-            mean_shift[2 * lm_idx] = ms_x
-            mean_shift[2 * lm_idx + 1] = ms_y
+            # STACKED format: [lm_idx] = x, [lm_idx + n_points] = y
+            mean_shift[lm_idx] = ms_x
+            mean_shift[lm_idx + n_points] = ms_y
 
         return mean_shift
 
@@ -1346,8 +1363,9 @@ class HierarchicalEyeModel:
                 ms_x = 0.0
                 ms_y = 0.0
 
-            mean_shift[2 * lm_idx] = ms_x
-            mean_shift[2 * lm_idx + 1] = ms_y
+            # STACKED format: [lm_idx] = x, [lm_idx + n_points] = y
+            mean_shift[lm_idx] = ms_x
+            mean_shift[lm_idx + n_points] = ms_y
 
             # DEBUG: Detailed Eye_8 trace (left eye outer corner)
             if lm_idx == 8 and hasattr(self, '_eye8_trace_file'):
@@ -1416,12 +1434,13 @@ class HierarchicalEyeModel:
         if hasattr(self, '_eye8_trace_file'):
             with open(self._eye8_trace_file, 'a') as f:
                 f.write(f"\n--- Eye_8 Solver (Rigid) ---\n")
-                # Jacobian rows for Eye_8 (rows 8 and 8+28=36)
+                # Jacobian rows for Eye_8 (STACKED format: rows 8 and 8+28=36)
                 J8_x = J_rigid[8, :]  # X row
                 J8_y = J_rigid[36, :]  # Y row (8 + 28)
                 f.write(f"Jacobian row 8 (X): [{', '.join([f'{v:.6f}' for v in J8_x])}]\n")
                 f.write(f"Jacobian row 36 (Y): [{', '.join([f'{v:.6f}' for v in J8_y])}]\n")
-                f.write(f"Mean-shift Eye_8: ({mean_shift[16]:.6f}, {mean_shift[17]:.6f})\n")
+                # STACKED format: [lm_idx] = x, [lm_idx + 28] = y
+                f.write(f"Mean-shift Eye_8: ({mean_shift[8]:.6f}, {mean_shift[8 + 28]:.6f})\n")
                 f.write(f"b vector: [{', '.join([f'{v:.6f}' for v in b])}]\n")
                 f.write(f"A matrix diagonal: [{', '.join([f'{A[i,i]:.6f}' for i in range(6)])}]\n")
                 f.write(f"delta_p: [{', '.join([f'{v:.6f}' for v in delta_p_rigid])}]\n")
@@ -1600,14 +1619,16 @@ class HierarchicalEyeModel:
                 not_improved = 0
             prev_error = error
 
-            # Get full Jacobian
+            # Get full Jacobian (STACKED format: rows 0:n = x, rows n:2n = y)
             J_full = pdm.compute_jacobian(params)  # (56, 16)
+            n = pdm.n_points  # 28
 
-            # Extract rows for our 6 landmarks (x,y interleaved)
+            # Extract rows for our 6 landmarks
+            # error_resid is interleaved [x0,y0,x1,y1,...], so J must match
             J = np.zeros((12, pdm.n_params))
             for i, eye_idx in enumerate(eye_indices):
-                J[2*i] = J_full[2*eye_idx]      # x component
-                J[2*i+1] = J_full[2*eye_idx+1]  # y component
+                J[2*i] = J_full[eye_idx]        # x component from stacked row eye_idx
+                J[2*i+1] = J_full[eye_idx + n]  # y component from stacked row eye_idx + n
 
             # Weighted Jacobian
             J_w_t = J.T @ W  # (16, 12)

@@ -298,29 +298,29 @@ def compute_jacobian_jit(X: np.ndarray,
     r11, r12, r13 = R[0, 0], R[0, 1], R[0, 2]
     r21, r22, r23 = R[1, 0], R[1, 1], R[1, 2]
 
-    # Rigid parameter derivatives
+    # Rigid parameter derivatives - STACKED format (x rows 0:n, y rows n:2n)
     for i in range(n_points):
         Xi, Yi, Zi = X[i], Y[i], Z[i]
 
         # Column 0: ∂/∂scale
-        J[2*i, 0] = Xi * r11 + Yi * r12 + Zi * r13
-        J[2*i + 1, 0] = Xi * r21 + Yi * r22 + Zi * r23
+        J[i, 0] = Xi * r11 + Yi * r12 + Zi * r13
+        J[i + n_points, 0] = Xi * r21 + Yi * r22 + Zi * r23
 
         # Column 1: ∂/∂wx (pitch)
-        J[2*i, 1] = s * (Yi * r13 - Zi * r12)
-        J[2*i + 1, 1] = s * (Yi * r23 - Zi * r22)
+        J[i, 1] = s * (Yi * r13 - Zi * r12)
+        J[i + n_points, 1] = s * (Yi * r23 - Zi * r22)
 
         # Column 2: ∂/∂wy (yaw)
-        J[2*i, 2] = -s * (Xi * r13 - Zi * r11)
-        J[2*i + 1, 2] = -s * (Xi * r23 - Zi * r21)
+        J[i, 2] = -s * (Xi * r13 - Zi * r11)
+        J[i + n_points, 2] = -s * (Xi * r23 - Zi * r21)
 
         # Column 3: ∂/∂wz (roll)
-        J[2*i, 3] = s * (Xi * r12 - Yi * r11)
-        J[2*i + 1, 3] = s * (Xi * r22 - Yi * r21)
+        J[i, 3] = s * (Xi * r12 - Yi * r11)
+        J[i + n_points, 3] = s * (Xi * r22 - Yi * r21)
 
         # Columns 4-5: ∂/∂tx, ∂/∂ty
-        J[2*i, 4] = 1.0
-        J[2*i + 1, 5] = 1.0
+        J[i, 4] = 1.0
+        J[i + n_points, 5] = 1.0
 
         # Shape parameter derivatives (columns 6+)
         for j in range(n_modes):
@@ -329,8 +329,8 @@ def compute_jacobian_jit(X: np.ndarray,
             phi_y = princ_comp[n_points + i, j]
             phi_z = princ_comp[2*n_points + i, j]
 
-            J[2*i, 6 + j] = s * (r11 * phi_x + r12 * phi_y + r13 * phi_z)
-            J[2*i + 1, 6 + j] = s * (r21 * phi_x + r22 * phi_y + r23 * phi_z)
+            J[i, 6 + j] = s * (r11 * phi_x + r12 * phi_y + r13 * phi_z)
+            J[i + n_points, 6 + j] = s * (r21 * phi_x + r22 * phi_y + r23 * phi_z)
 
     return J
 
