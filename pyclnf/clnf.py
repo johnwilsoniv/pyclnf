@@ -286,27 +286,6 @@ class CLNF:
         else:
             params = initial_params.copy()
 
-        # DEBUG: Save initial landmarks and params
-        init_landmarks = self.pdm.params_to_landmarks_2d(params)
-        with open('/tmp/python_init_landmarks_68.txt', 'w') as f:
-            f.write(f"Initial landmarks (ITER0):\n")
-            f.write(f"Number of points (n): {len(init_landmarks)}\n")
-
-            # Print params (Python format: [scale, rot_x, rot_y, rot_z, trans_x, trans_y, local...])
-            f.write(f"params (size {len(params)}):\n")
-            f.write(f"  params[0] (scale): {params[0]:.6f}\n")
-            f.write(f"  params[1] (rot_x): {params[1]:.6f}\n")
-            f.write(f"  params[2] (rot_y): {params[2]:.6f}\n")
-            f.write(f"  params[3] (rot_z): {params[3]:.6f}\n")
-            f.write(f"  params[4] (trans_x): {params[4]:.6f}\n")
-            f.write(f"  params[5] (trans_y): {params[5]:.6f}\n")
-            f.write(f"params_local (first 10):\n")
-            for i in range(min(10, len(params) - 6)):
-                f.write(f"  params_local[{i}]: {params[6+i]:.6f}\n")
-
-            for i, (x, y) in enumerate(init_landmarks):
-                f.write(f"Landmark_{i}: ({x:.6f}, {y:.6f})\n")
-
         # Estimate head pose from bbox for view selection
         # For now, assume frontal view (view 0)
         # TODO: Implement pose estimation from bbox orientation
@@ -493,6 +472,156 @@ class CLNF:
             info['params'] = optimized_params
 
         return landmarks, info
+
+    def fit_multi_hypothesis(self,
+                             image: np.ndarray,
+                             face_bbox: Tuple[float, float, float, float],
+                             return_params: bool = False) -> Tuple[np.ndarray, Dict]:
+        """
+        Fit CLNF model using multi-hypothesis rotation testing (like C++ OpenFace).
+
+        This matches the C++ OpenFace DetectLandmarksInImageMultiHypBasic function.
+        Tests 11 rotation hypotheses and selects the best by model likelihood.
+
+        The 11 hypotheses are (from C++ LandmarkDetectorFunc.cpp lines 728-738):
+        - (0, 0, 0) - frontal
+        - (0, -0.5236, 0) - yaw -30°
+        - (0, 0.5236, 0) - yaw +30°
+        - (0, -0.96, 0) - yaw -55°
+        - (0, 0.96, 0) - yaw +55°
+        - (0, 0, 0.5236) - roll +30°
+        - (0, 0, -0.5236) - roll -30°
+        - (0, -1.57, 0) - yaw -90° (profile left)
+        - (0, 1.57, 0) - yaw +90° (profile right)
+        - (0, -1.22, 0.698) - yaw -70° with roll
+        - (0, 1.22, -0.698) - yaw +70° with roll
+
+        Args:
+            image: Input image (grayscale or color)
+            face_bbox: Face bounding box [x, y, width, height]
+            return_params: If True, include optimized parameters in info dict
+
+        Returns:
+            landmarks: Best detected 2D landmarks, shape (68, 2)
+            info: Dictionary with fitting information including 'best_hypothesis'
+        """
+        # C++ rotation hypotheses (pitch, yaw, roll)
+        rotation_hypotheses = [
+            np.array([0.0, 0.0, 0.0]),        # frontal
+            np.array([0.0, -0.5236, 0.0]),    # yaw -30°
+            np.array([0.0, 0.5236, 0.0]),     # yaw +30°
+            np.array([0.0, -0.96, 0.0]),      # yaw -55°
+            np.array([0.0, 0.96, 0.0]),       # yaw +55°
+            np.array([0.0, 0.0, 0.5236]),     # roll +30°
+            np.array([0.0, 0.0, -0.5236]),    # roll -30°
+            np.array([0.0, -1.57, 0.0]),      # yaw -90° (profile left)
+            np.array([0.0, 1.57, 0.0]),       # yaw +90° (profile right)
+            np.array([0.0, -1.22, 0.698]),    # yaw -70° with roll
+            np.array([0.0, 1.22, -0.698]),    # yaw +70° with roll
+        ]
+
+        # Convert to grayscale if needed
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image
+
+        best_landmarks = None
+        best_params = None
+        best_info = None
+        best_likelihood = -np.inf
+        best_hypothesis_idx = 0
+
+        for idx, rotation in enumerate(rotation_hypotheses):
+            # Initialize params with this rotation hypothesis
+            initial_params = self.pdm.init_params_with_rotation(face_bbox, rotation)
+
+            # Run full CLNF fitting with this initialization
+            landmarks, info = self.fit(
+                image, face_bbox, initial_params=initial_params, return_params=True
+            )
+            params = info['params']
+
+            # Compute model likelihood (simplified version)
+            # C++ computes this from patch response maps weighted by Gaussian kernel
+            # For now, use negative mean squared error from landmarks to init as proxy
+            # A better approach would be to compute actual patch likelihoods
+            likelihood = self._compute_model_likelihood(gray, landmarks, params)
+
+            if self.debug_mode:
+                print(f"[MULTI_HYP] Hypothesis {idx}: rot=({rotation[0]:.3f}, {rotation[1]:.3f}, {rotation[2]:.3f})")
+                print(f"            likelihood={likelihood:.4f}, converged={info['converged']}")
+
+            if likelihood > best_likelihood:
+                best_likelihood = likelihood
+                best_landmarks = landmarks
+                best_params = params
+                best_info = info.copy()
+                best_hypothesis_idx = idx
+
+        # Update best_info with multi-hypothesis details
+        best_info['best_hypothesis'] = best_hypothesis_idx
+        best_info['best_rotation'] = rotation_hypotheses[best_hypothesis_idx].tolist()
+        best_info['model_likelihood'] = best_likelihood
+
+        if return_params:
+            best_info['params'] = best_params
+
+        return best_landmarks, best_info
+
+    def _compute_model_likelihood(self, gray: np.ndarray, landmarks: np.ndarray,
+                                   params: np.ndarray) -> float:
+        """
+        Compute model likelihood for hypothesis selection.
+
+        This is a simplified version of C++ likelihood computation.
+        C++ uses patch response maps weighted by Gaussian kernel:
+            loglhood += log(sum(patch_response * gaussian_weight) + 1e-8)
+            loglhood /= num_visible_landmarks
+
+        For now, we use a simpler heuristic based on:
+        1. How well landmarks fit within the image bounds
+        2. Regularization penalty on shape parameters
+        3. Scale reasonableness
+
+        Args:
+            gray: Grayscale image
+            landmarks: 2D landmarks (68, 2)
+            params: Parameter vector [s, wx, wy, wz, tx, ty, local...]
+
+        Returns:
+            likelihood: Model likelihood (higher is better)
+        """
+        h, w = gray.shape[:2]
+
+        # Penalize landmarks outside image
+        in_bounds = (
+            (landmarks[:, 0] >= 0) & (landmarks[:, 0] < w) &
+            (landmarks[:, 1] >= 0) & (landmarks[:, 1] < h)
+        )
+        bounds_score = np.mean(in_bounds)
+
+        # Penalize large shape deformations (regularization)
+        local_params = params[6:]
+        eigenvalues = self.pdm.eigen_values
+        if len(local_params) > 0 and len(eigenvalues) > 0:
+            # Weight by inverse eigenvalues (like C++ regularization)
+            shape_penalty = np.sum((local_params ** 2) / (eigenvalues + 1e-6))
+            shape_score = np.exp(-0.01 * shape_penalty)
+        else:
+            shape_score = 1.0
+
+        # Penalize unreasonable scale
+        scale = params[0]
+        if scale < 0.5 or scale > 10:
+            scale_score = 0.1
+        else:
+            scale_score = 1.0
+
+        # Combined likelihood
+        likelihood = bounds_score * shape_score * scale_score
+
+        return likelihood
 
     def detect_and_fit(self,
                        image: np.ndarray,
