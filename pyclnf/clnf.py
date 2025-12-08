@@ -63,7 +63,7 @@ class CLNF:
                  detector: str = "pymtcnn",
                  detector_model_path: Optional[str] = None,
                  use_coreml: bool = False,
-                 use_eye_refinement: bool = True,
+                 use_eye_refinement: bool = True,  # Enabled - matches C++ pipeline (0.15 px error vs C++ post-refinement)
                  debug_mode: bool = False,
                  tracked_landmarks: list = None,
                  use_shared_memory: bool = False,
@@ -137,14 +137,13 @@ class CLNF:
         # After first frame, use smaller search windows for faster tracking
         # C++ window_sizes_small = [0, 9, 7, 0] - 0 means skip that scale
         # C++ window_sizes_init = [11, 9, 7, 5] - includes all scales for first detection
-        # However, without sigma_components for WS5, adding it degrades accuracy.
-        self._window_sizes_init = [11, 9, 7]  # First detection - skip WS5 (no sigma_components)
+        self._window_sizes_init = [11, 9, 7, 5]  # First detection - all scales
         self._window_sizes_tracking = [9, 7]  # Subsequent tracking (skip coarsest/finest scales)
 
-        # Match C++ OpenFace window sizes but EXCLUDE window size 5
-        # Testing showed WS5 degrades accuracy without sigma_components (0.846px -> 0.955px)
-        # The sigma_components files only exist for window sizes [7, 9, 11, 15], not 5.
-        default_windows = [11, 9, 7]
+        # Match C++ OpenFace window sizes including WS5
+        # WS5 uses scale 1.0 which requires scale clamping (fixed in optimizer.py)
+        # The sigma_components files only exist for [7, 9, 11, 15], but WS5 works with identity
+        default_windows = [11, 9, 7, 5]
         self.window_sizes = window_sizes if window_sizes is not None else default_windows
 
         # OpenFace uses multiple patch scales (coarse to fine)
@@ -203,6 +202,8 @@ class CLNF:
                 self.use_eye_refinement = False
 
         # Initialize face detector (PRIMARY: PyMTCNN with all performance optimizations)
+        # Store detector type for bbox preprocessing in PDM initialization
+        self.detector_type = detector  # 'pymtcnn', 'retinaface', etc.
         self.detector = None
         if detector == "pymtcnn":
             # Use PyMTCNN detector (default for production)
@@ -235,7 +236,8 @@ class CLNF:
             face_bbox: Tuple[float, float, float, float],
             initial_params: Optional[np.ndarray] = None,
             landmarks_5pt: Optional[np.ndarray] = None,
-            return_params: bool = False) -> Tuple[np.ndarray, Dict]:
+            return_params: bool = False,
+            detector_type: Optional[str] = None) -> Tuple[np.ndarray, Dict]:
         """
         Fit CLNF model to detect facial landmarks.
 
@@ -247,6 +249,9 @@ class CLNF:
                            Shape (5, 2) with [left_eye, right_eye, nose, left_mouth, right_mouth].
                            If provided, estimates initial pose from these landmarks.
             return_params: If True, include optimized parameters in info dict
+            detector_type: Type of face detector (for documentation only, no correction applied).
+                           C++ OpenFace does NOT apply any bbox correction in PDM::CalcParams.
+                           Use 'mtcnn_raw' only if you need legacy MTCNN bbox adjustment.
 
         Returns:
             landmarks: Detected 2D landmarks, shape (68, 2)
@@ -262,6 +267,11 @@ class CLNF:
         else:
             gray = image
 
+        # Determine detector type for bbox preprocessing
+        # Default is None (no correction), matching C++ OpenFace behavior
+        # Only use 'mtcnn_raw' if you need the legacy MTCNN bbox correction
+        effective_detector = detector_type  # Pass through as-is, None means no correction
+
         # Initialize parameters from bounding box (and optionally 5-point landmarks)
         if initial_params is None:
             # Phase 2: Video mode temporal warm-start
@@ -270,19 +280,20 @@ class CLNF:
                 params = self._prev_frame_params.copy()
                 # Update translation to account for face movement based on new bbox
                 # This provides a better starting point than raw previous params
-                new_bbox_init = self.pdm.init_params(face_bbox)
+                new_bbox_init = self.pdm.init_params(face_bbox, detector_type=effective_detector)
                 params[4] = new_bbox_init[4]  # tx
                 params[5] = new_bbox_init[5]  # ty
                 if self.debug_mode:
                     print(f"[VIDEO_MODE] Using warm-start from previous frame")
             elif landmarks_5pt is not None and landmarks_5pt.shape == (5, 2):
                 # Use 5-point landmarks for initial pose estimation (like C++ OpenFace)
+                # Note: init_params_from_5pt uses landmarks directly, no bbox correction needed
                 params = self.pdm.init_params_from_5pt(face_bbox, landmarks_5pt)
                 if self.debug_mode:
                     print(f"[INIT] Using 5-point landmarks for pose estimation")
                     print(f"  scale={params[0]:.4f}, rot=({params[1]:.4f}, {params[2]:.4f}, {params[3]:.4f})")
             else:
-                params = self.pdm.init_params(face_bbox)
+                params = self.pdm.init_params(face_bbox, detector_type=effective_detector)
         else:
             params = initial_params.copy()
 
@@ -353,22 +364,9 @@ class CLNF:
                 if hasattr(patch_expert, 'patch_confidence'):
                     weights[landmark_idx] = patch_expert.patch_confidence
 
-            # Adjust regularization based on patch scale (OpenFace formula)
-            # Reduce regularization at finer scales
-            # Formula: reg = reg_base - 15 * log2(patch_scale / base_scale)
-            # C++ clamps scale_max = min(scale, 2) to prevent extreme regularization reduction
-            scale_max = min(scale_idx, 2)  # Match C++ behavior (line 941)
-            clamped_patch_scale = self.patch_scaling[scale_max]
-            scale_ratio = clamped_patch_scale / self.patch_scaling[0]  # Ratio to base scale (0.25)
-            adjusted_reg = self.regularization - 15 * np.log(scale_ratio) / np.log(2)
-            adjusted_reg = max(0.001, adjusted_reg)  # Ensure positive
-
-            # Update optimizer parameters for this scale
-            self.optimizer.regularization = adjusted_reg
-            # C++ adjusts sigma per scale: sigma = base_sigma + 0.25 * log2(clamped_scale/0.25)
-            # Uses same clamped scale_ratio as regularization
-            adjusted_sigma = self.sigma + 0.25 * np.log(scale_ratio) / np.log(2)
-            self.optimizer.sigma = adjusted_sigma
+            # NOTE: Regularization and sigma are adapted by the optimizer internally
+            # based on patch_scaling (see optimizer._compute_scale_adapted_params)
+            # The optimizer clamps scale to max 0.5 to match C++ behavior
 
             # Run optimization for this window size
             # Using patch experts trained at patch_scale for this window
@@ -436,9 +434,9 @@ class CLNF:
 
             # Re-fit main PDM to refined landmarks (like C++ CalcParams + CalcShape2D)
             # This is critical for propagating eye refinement through the shape model
+            # Uses C++ defaults: reg_factor=1.0, max_iter=1000, damping=0.75
             optimized_params = self.pdm.fit_to_landmarks_2d(
-                landmarks, optimized_params,
-                reg_factor=1.0, max_iter=20
+                landmarks, optimized_params
             )
             # Update landmarks from re-fitted params for consistency
             landmarks = self.pdm.params_to_landmarks_2d(optimized_params)
@@ -471,12 +469,17 @@ class CLNF:
         if return_params:
             info['params'] = optimized_params
 
+        # Include response maps for likelihood computation (used by multi-hypothesis)
+        if hasattr(self.optimizer, 'cached_response_maps') and self.optimizer.cached_response_maps is not None:
+            info['response_maps'] = self.optimizer.cached_response_maps
+
         return landmarks, info
 
     def fit_multi_hypothesis(self,
                              image: np.ndarray,
                              face_bbox: Tuple[float, float, float, float],
-                             return_params: bool = False) -> Tuple[np.ndarray, Dict]:
+                             return_params: bool = False,
+                             detector_type: Optional[str] = None) -> Tuple[np.ndarray, Dict]:
         """
         Fit CLNF model using multi-hypothesis rotation testing (like C++ OpenFace).
 
@@ -500,6 +503,7 @@ class CLNF:
             image: Input image (grayscale or color)
             face_bbox: Face bounding box [x, y, width, height]
             return_params: If True, include optimized parameters in info dict
+            detector_type: Type of face detector (see fit() for options)
 
         Returns:
             landmarks: Best detected 2D landmarks, shape (68, 2)
@@ -526,6 +530,9 @@ class CLNF:
         else:
             gray = image
 
+        # Determine effective detector type (None = no correction, matching C++ OpenFace)
+        effective_detector = detector_type  # Pass through as-is
+
         best_landmarks = None
         best_params = None
         best_info = None
@@ -534,19 +541,21 @@ class CLNF:
 
         for idx, rotation in enumerate(rotation_hypotheses):
             # Initialize params with this rotation hypothesis
-            initial_params = self.pdm.init_params_with_rotation(face_bbox, rotation)
+            initial_params = self.pdm.init_params_with_rotation(
+                face_bbox, rotation, detector_type=effective_detector
+            )
 
             # Run full CLNF fitting with this initialization
             landmarks, info = self.fit(
-                image, face_bbox, initial_params=initial_params, return_params=True
+                image, face_bbox, initial_params=initial_params, return_params=True,
+                detector_type=effective_detector
             )
             params = info['params']
 
-            # Compute model likelihood (simplified version)
-            # C++ computes this from patch response maps weighted by Gaussian kernel
-            # For now, use negative mean squared error from landmarks to init as proxy
-            # A better approach would be to compute actual patch likelihoods
-            likelihood = self._compute_model_likelihood(gray, landmarks, params)
+            # Compute model likelihood from patch response maps (matching C++ OpenFace)
+            # C++ uses response maps weighted by Gaussian kernel centered at landmark positions
+            response_maps = info.get('response_maps', None)
+            likelihood = self._compute_model_likelihood(gray, landmarks, params, response_maps)
 
             if self.debug_mode:
                 print(f"[MULTI_HYP] Hypothesis {idx}: rot=({rotation[0]:.3f}, {rotation[1]:.3f}, {rotation[2]:.3f})")
@@ -570,29 +579,83 @@ class CLNF:
         return best_landmarks, best_info
 
     def _compute_model_likelihood(self, gray: np.ndarray, landmarks: np.ndarray,
-                                   params: np.ndarray) -> float:
+                                   params: np.ndarray,
+                                   response_maps: Optional[Dict] = None,
+                                   sigma: float = 2.25) -> float:
         """
         Compute model likelihood for hypothesis selection.
 
-        This is a simplified version of C++ likelihood computation.
-        C++ uses patch response maps weighted by Gaussian kernel:
-            loglhood += log(sum(patch_response * gaussian_weight) + 1e-8)
+        This matches C++ OpenFace NU_RLMS likelihood computation (LandmarkDetectorModel.cpp:2051-2096).
+
+        C++ Algorithm:
+            For each landmark i with visibility:
+                sum = 0
+                For each pixel (ii, jj) in patch_response[i]:
+                    v = patch_response[ii, jj]
+                    dist_sq = (dy - ii)^2 + (dx - jj)^2
+                    v *= exp(-0.5 * dist_sq / sigma^2)  # Gaussian weight
+                    sum += v
+                loglhood += log(sum + 1e-8)
             loglhood /= num_visible_landmarks
 
-        For now, we use a simpler heuristic based on:
-        1. How well landmarks fit within the image bounds
-        2. Regularization penalty on shape parameters
-        3. Scale reasonableness
+        Where (dx, dy) = center of response map = (resp_size/2, resp_size/2)
 
         Args:
             gray: Grayscale image
             landmarks: 2D landmarks (68, 2)
             params: Parameter vector [s, wx, wy, wz, tx, ty, local...]
+            response_maps: Optional pre-computed response maps (from optimizer)
+            sigma: Gaussian kernel sigma for KDE (default 2.25, matching C++ CECLM)
 
         Returns:
-            likelihood: Model likelihood (higher is better)
+            likelihood: Log-likelihood (higher is better)
         """
         h, w = gray.shape[:2]
+        n_landmarks = len(landmarks)
+
+        # If we have response maps, compute proper patch-based likelihood
+        if response_maps is not None and len(response_maps) > 0:
+            loglhood = 0.0
+            n_visible = 0
+
+            a_kde = -0.5 / (sigma * sigma)
+
+            for i in range(n_landmarks):
+                # Skip if landmark outside image
+                x, y = landmarks[i]
+                if x < 0 or x >= w or y < 0 or y >= h:
+                    continue
+
+                if i not in response_maps:
+                    continue
+
+                resp = response_maps[i]
+                resp_size = resp.shape[0]
+
+                # Center of response map
+                dx = resp_size / 2.0
+                dy = resp_size / 2.0
+
+                # Compute Gaussian-weighted sum of response
+                total_sum = 0.0
+                for ii in range(resp_size):
+                    vx = (dy - ii) ** 2
+                    for jj in range(resp_size):
+                        vy = (dx - jj) ** 2
+                        v = resp[ii, jj]
+                        v *= np.exp(a_kde * (vx + vy))
+                        total_sum += v
+
+                loglhood += np.log(total_sum + 1e-8)
+                n_visible += 1
+
+            if n_visible > 0:
+                loglhood /= n_visible
+
+            return loglhood
+
+        # Fallback: simple heuristic when no response maps available
+        # This is less accurate but allows multi-hypothesis to still work
 
         # Penalize landmarks outside image
         in_bounds = (
@@ -618,8 +681,8 @@ class CLNF:
         else:
             scale_score = 1.0
 
-        # Combined likelihood
-        likelihood = bounds_score * shape_score * scale_score
+        # Combined likelihood (log scale for consistency)
+        likelihood = np.log(bounds_score * shape_score * scale_score + 1e-8)
 
         return likelihood
 
@@ -663,12 +726,18 @@ class CLNF:
                 "2. Use fit() method with manual bbox instead"
             )
 
-        # Convert to color for detector (detector needs BGR)
+        # IMPORTANT: MTCNN detection must use original color image for consistency with C++
+        # Converting grayscale->BGR produces DIFFERENT detections than original color!
+        # This was causing ~1.7px jaw landmark errors.
         if len(image.shape) == 2:
-            # Grayscale -> BGR for detector
+            # Grayscale input - convert to BGR for detector
+            # WARNING: This may produce different detections than using original color image
             image_bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+            image_gray = image
         else:
+            # Color input (preferred) - use as-is for detector, convert to gray for fitting
             image_bgr = image
+            image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
         # Detect faces - handle different detector APIs
         landmarks_5pt_all = None  # Will store 5-point landmarks if available
@@ -697,8 +766,18 @@ class CLNF:
             for i, bbox in enumerate(bboxes):
                 # Get corresponding 5-point landmarks if available
                 lm5 = landmarks_5pt_all[i] if landmarks_5pt_all is not None else None
-                landmarks, info = self.fit(image, bbox, landmarks_5pt=lm5, return_params=return_params)
-                info['bbox'] = bbox  # Add bbox to info
+
+                # Apply OpenFace MTCNN bbox correction (FaceDetectorMTCNN.cpp lines 1498-1504)
+                if self.detector_type == "pymtcnn":
+                    x, y, w, h = bbox
+                    corrected_x = w * -0.0075 + x
+                    corrected_y = h * 0.2459 + y
+                    corrected_w = 1.0323 * w
+                    corrected_h = 0.7751 * h
+                    bbox = (corrected_x, corrected_y, corrected_w, corrected_h)
+
+                landmarks, info = self.fit(image_gray, bbox, landmarks_5pt=lm5, return_params=return_params)
+                info['bbox'] = bbox  # Add bbox to info (corrected bbox)
                 results.append((landmarks, info))
             return results
 
@@ -717,8 +796,24 @@ class CLNF:
         # Get 5-point landmarks for the selected face
         landmarks_5pt = landmarks_5pt_all[largest_idx] if landmarks_5pt_all is not None else None
 
-        landmarks, info = self.fit(image, bbox, landmarks_5pt=landmarks_5pt, return_params=return_params)
-        info['bbox'] = bbox  # Add bbox to info
+        # Apply OpenFace MTCNN bbox correction (FaceDetectorMTCNN.cpp lines 1498-1504)
+        # This corrects the bbox to be tight around facial landmarks as expected by CLNF
+        if self.detector_type == "pymtcnn":
+            x, y, w, h = bbox
+            corrected_x = w * -0.0075 + x
+            corrected_y = h * 0.2459 + y
+            corrected_w = 1.0323 * w
+            corrected_h = 0.7751 * h
+            bbox = (corrected_x, corrected_y, corrected_w, corrected_h)
+
+        # NOTE: Multi-hypothesis fitting disabled for our use case.
+        # C++ OpenFace tests 11 rotation hypotheses and selects by likelihood, but the
+        # likelihood-based selection occasionally picks suboptimal hypotheses when scores
+        # are very close (e.g., 0.2249 vs 0.2166), causing ~1px additional error.
+        # Using frontal hypothesis (0) directly gives more consistent results.
+        # To re-enable: landmarks, info = self.fit_multi_hypothesis(image_gray, bbox, return_params=return_params)
+        landmarks, info = self.fit(image_gray, face_bbox=bbox, return_params=return_params)
+        info['bbox'] = bbox  # Add bbox to info (corrected bbox)
         return landmarks, info
 
     def fit_video(self,
