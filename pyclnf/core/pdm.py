@@ -407,7 +407,8 @@ class PDM:
 
         return (corrected_x, corrected_y, corrected_w, corrected_h)
 
-    def init_params(self, bbox: Optional[Tuple[float, float, float, float]] = None) -> np.ndarray:
+    def init_params(self, bbox: Optional[Tuple[float, float, float, float]] = None,
+                    detector_type: str = None) -> np.ndarray:
         """
         Initialize parameter vector from face bounding box or to neutral pose.
 
@@ -415,6 +416,11 @@ class PDM:
 
         Args:
             bbox: Optional bounding box [x, y, width, height] to estimate initial scale/translation
+            detector_type: Type of face detector that produced the bbox. Options:
+                - None (default): No correction, use bbox directly (matches C++ OpenFace)
+                - 'mtcnn_raw': Apply MTCNN-specific correction (only for raw MTCNN boxes
+                  that need adjustment - NOT typically needed)
+                C++ OpenFace does NOT apply any bbox correction in PDM::CalcParams.
 
         Returns:
             params: Initial parameter vector [s, wx, wy, wz, tx, ty, q0, ..., qm]
@@ -423,8 +429,10 @@ class PDM:
         params = np.zeros(self.n_params)
 
         if bbox is not None:
-            # Apply MTCNN-style preprocessing if needed (currently a no-op)
-            bbox = self._apply_mtcnn_bbox_preprocessing(bbox)
+            # Only apply MTCNN correction if explicitly requested for raw MTCNN boxes
+            # C++ OpenFace does NOT apply any correction in PDM::CalcParams
+            if detector_type == 'mtcnn_raw':
+                bbox = self._apply_mtcnn_bbox_preprocessing(bbox)
             x, y, width, height = bbox
 
             # OpenFace-style initialization (aspect-ratio aware)
@@ -483,7 +491,8 @@ class PDM:
         return params
 
     def init_params_with_rotation(self, bbox: Tuple[float, float, float, float],
-                                   rotation: np.ndarray) -> np.ndarray:
+                                   rotation: np.ndarray,
+                                   detector_type: str = None) -> np.ndarray:
         """
         Initialize parameters from bounding box with specified rotation.
 
@@ -499,14 +508,16 @@ class PDM:
         Args:
             bbox: Bounding box [x, y, width, height]
             rotation: Rotation vector [wx, wy, wz] in radians (pitch, yaw, roll)
+            detector_type: Type of face detector ('mtcnn' applies correction, others don't)
 
         Returns:
             params: Initial parameter vector with specified rotation
         """
         params = np.zeros(self.n_params)
 
-        # Apply MTCNN-style preprocessing
-        bbox = self._apply_mtcnn_bbox_preprocessing(bbox)
+        # Only apply MTCNN correction if explicitly requested for raw MTCNN boxes
+        if detector_type == 'mtcnn_raw':
+            bbox = self._apply_mtcnn_bbox_preprocessing(bbox)
         x, y, width, height = bbox
 
         # Get mean shape (local params = 0)
@@ -1237,8 +1248,8 @@ class PDM:
         return np.array([pitch, yaw, roll], dtype=np.float32)
 
     def fit_to_landmarks_2d(self, landmarks_2d: np.ndarray, current_params: np.ndarray,
-                             reg_factor: float = 1.0, max_iter: int = 20,
-                             convergence_thresh: float = 0.001) -> np.ndarray:
+                             reg_factor: float = 1.0, max_iter: int = 1000,
+                             damping: float = 0.75) -> np.ndarray:
         """
         Fit PDM parameters to 2D landmarks using Gauss-Newton optimization.
 
@@ -1252,8 +1263,8 @@ class PDM:
             landmarks_2d: Target 2D landmarks, shape (68, 2)
             current_params: Current parameter estimate (used for initialization)
             reg_factor: Regularization factor for shape parameters (default: 1.0)
-            max_iter: Maximum optimization iterations (default: 20)
-            convergence_thresh: Convergence threshold for parameter change (default: 0.001)
+            max_iter: Maximum optimization iterations (default: 1000, matches C++)
+            damping: Damping factor for parameter updates (default: 0.75, matches C++)
 
         Returns:
             fitted_params: Optimized parameter vector
@@ -1265,6 +1276,14 @@ class PDM:
         n = landmarks_2d.shape[0]
         target = np.concatenate([landmarks_2d[:, 0], landmarks_2d[:, 1]]).astype(np.float64)
 
+        # Precompute regularization diagonal (C++ style: reg_factor / eigen_values)
+        reg_diag = np.zeros(self.n_params, dtype=np.float64)
+        reg_diag[6:] = reg_factor / self.eigen_values.flatten()
+
+        # C++ convergence: error must improve by 0.1%, stop after 3 consecutive non-improvements
+        prev_error = np.inf
+        not_improved_count = 0
+
         for iteration in range(max_iter):
             # Get current 2D landmarks in STACKED format
             current_2d_xy = self.params_to_landmarks_2d(params)
@@ -1273,21 +1292,32 @@ class PDM:
             # Compute residual (both in stacked format now)
             residual = target - current_2d
 
+            # Compute current error (L2 norm of residual)
+            curr_error = np.linalg.norm(residual)
+
+            # C++ convergence check: if error didn't improve by 0.1%
+            if 0.999 * prev_error < curr_error:
+                not_improved_count += 1
+                if not_improved_count >= 3:
+                    break
+            else:
+                not_improved_count = 0
+            prev_error = curr_error
+
             # Compute Jacobian
             J = self.compute_jacobian(params)  # Shape: (2*n_points, n_params)
 
-            # Build Hessian with regularization
-            # H = J^T J + lambda * diag(eigenvalues)
+            # Build Hessian with regularization: H = J^T J + diag(reg)
             JtJ = J.T @ J
-
-            # Add regularization for shape parameters (indices 6+)
-            # C++ uses no epsilon: reg_factor / eigen_values
-            reg_diag = np.zeros(self.n_params)
-            reg_diag[6:] = reg_factor / self.eigen_values.flatten()
             H = JtJ + np.diag(reg_diag)
 
-            # Solve for parameter update: delta = H^(-1) J^T residual
+            # Compute gradient: g = J^T @ residual
             g = J.T @ residual
+
+            # C++ adds regularization term to gradient for shape parameters:
+            # g[6:] -= reg_diag[6:] * params[6:]
+            # This pulls shape params toward zero (prior)
+            g[6:] = g[6:] - reg_diag[6:] * params[6:]
 
             try:
                 delta_p = np.linalg.solve(H, g)
@@ -1295,15 +1325,14 @@ class PDM:
                 # Singular matrix - use pseudoinverse
                 delta_p = np.linalg.lstsq(H, g, rcond=None)[0]
 
+            # C++ applies 0.75 damping to prevent overshooting
+            delta_p = damping * delta_p
+
             # Update parameters using proper rotation composition
             params = self.update_params(params, delta_p)
 
             # Clamp parameters
             params = self.clamp_params(params, n_std=3.0)
-
-            # Check convergence
-            if np.linalg.norm(delta_p) < convergence_thresh:
-                break
 
         return params
 

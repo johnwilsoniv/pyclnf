@@ -71,7 +71,7 @@ def align_shapes_with_scale(src_shape: np.ndarray, dst_shape: np.ndarray) -> np.
     transform = np.array([
         [sa, -sb, tx],
         [sb,  sa, ty]
-    ], dtype=np.float32)
+    ], dtype=np.float64)  # Use float64 for precision (matches C++ double)
 
     return transform
 
@@ -137,6 +137,6 @@ def invert_similarity_transform(transform: np.ndarray) -> np.ndarray:
     inv_transform = np.array([
         [inv_a, -inv_b, inv_tx],
         [inv_b,  inv_a, inv_ty]
-    ], dtype=np.float32)
+    ], dtype=np.float64)  # Use float64 for precision (matches C++ double)
 
     return inv_transform
