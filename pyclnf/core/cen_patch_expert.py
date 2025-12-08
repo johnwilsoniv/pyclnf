@@ -220,12 +220,15 @@ class CENPatchExpert:
 
         Matches C++ CEN_patch_expert::ResponseSparse() exactly:
         1. Flip right AOI horizontally
-        2. im2col both AOIs
+        2. SPARSE im2col with contrast norm (skips every other patch)
         3. Concatenate and process through neural network together
-        4. Split results and flip right response back
+        4. Apply interpolation matrix to fill in skipped positions
+        5. Split results and flip right response back
 
         This is how C++ processes frontal faces - both symmetric landmarks
-        are computed together in a single neural network pass.
+        are computed together in a single neural network pass. C++ uses
+        sparse computation for speed, computing only ~50% of patches and
+        interpolating the rest from neighbors.
 
         Args:
             area_of_interest_left: Left landmark's AOI (H, W) or None
@@ -253,33 +256,36 @@ class CENPatchExpert:
         right_provided = area_of_interest_right is not None
 
         response_height = 0
+        input_height = 0
+        input_width = 0
         im2col_left = None
         im2col_right = None
 
-        # Process right AOI: flip horizontally BEFORE im2col (like C++ line 555)
+        # Process right AOI: flip horizontally BEFORE sparse im2col (like C++ line 555)
         if right_provided:
             aoi_right_flipped = cv2.flip(area_of_interest_right.astype(np.float32), 1)
             response_height = aoi_right_flipped.shape[0] - self.height_support + 1
-            im2col_right = im2col_bias(aoi_right_flipped, self.width_support, self.height_support)
-            im2col_right = contrast_norm(im2col_right)
+            input_height = aoi_right_flipped.shape[0]
+            input_width = aoi_right_flipped.shape[1]
+            # Use sparse im2col with contrast norm (like C++ im2colBiasSparseContrastNorm)
+            im2col_right = im2col_bias_sparse_contrast_norm(
+                aoi_right_flipped, self.width_support, self.height_support
+            )
 
         # Process left AOI (no flip)
         if left_provided:
             response_height = area_of_interest_left.shape[0] - self.height_support + 1
-            im2col_left = im2col_bias(area_of_interest_left, self.width_support, self.height_support)
-            im2col_left = contrast_norm(im2col_left)
+            input_height = area_of_interest_left.shape[0]
+            input_width = area_of_interest_left.shape[1]
+            # Use sparse im2col with contrast norm (like C++ im2colBiasSparseContrastNorm)
+            im2col_left = im2col_bias_sparse_contrast_norm(
+                area_of_interest_left.astype(np.float32),
+                self.width_support, self.height_support
+            )
 
         # Concatenate and process together (like C++ line 570)
-        # C++ im2col_prealloc shape: (num_features=122, num_patches=121)
-        # Python im2col_bias shape: (num_patches=121, num_features=122)
-        # C++ does vconcat then transpose - we need to match this
         if left_provided and right_provided:
-            # Concatenate along the patch dimension (axis 0), then transpose
-            # C++ vconcat: (122, 121) + (122, 121) -> (122, 242)
-            # C++ .t(): (122, 242) -> (242, 122)
-            # Our shape: (121, 122) + (121, 122) -> (242, 122) [after vstack]
             combined = np.vstack([im2col_left, im2col_right])
-            # No transpose needed - our shape is already (num_patches*2, num_features)
         elif left_provided:
             combined = im2col_left
         elif right_provided:
@@ -300,25 +306,42 @@ class CENPatchExpert:
             elif self.activation_function[i] == 2:
                 layer_output = np.maximum(0, layer_output)
 
-        # Split results (like C++ lines 584-596)
+        # Get interpolation matrix (cached)
+        response_width = response_height  # Square response for CEN
+        interp_matrix = get_interpolation_matrix(
+            response_height, response_width, input_height, input_width
+        )
+
+        # Split and apply interpolation (like C++ lines 598-616)
         response_left = None
         response_right = None
-        response_width = response_height  # Square response for CEN
-        num_patches = response_height * response_width
+        num_sparse = im2col_left.shape[0] if left_provided else im2col_right.shape[0]
 
         if left_provided and right_provided:
             # Split in half (first half = left, second half = right)
-            resp_left_flat = layer_output[:num_patches].flatten()
-            resp_right_flat = layer_output[num_patches:].flatten()
+            resp_left_sparse = layer_output[:num_sparse].flatten()  # (num_sparse,)
+            resp_right_sparse = layer_output[num_sparse:].flatten()
 
-            response_left = resp_left_flat.reshape(response_height, response_width, order='F')
-            response_right = resp_right_flat.reshape(response_height, response_width, order='F')
+            # Apply interpolation: response = sparse @ interp_matrix
+            # interp_matrix is (num_sparse, response_height * response_width)
+            # resp_sparse is (num_sparse,) -> need (1, num_sparse) for matmul
+            resp_left_full = resp_left_sparse @ interp_matrix  # (response_h * response_w,)
+            resp_right_full = resp_right_sparse @ interp_matrix
+
+            # Reshape with C++ ordering: t().reshape(1, response_height).t()
+            # This is equivalent to reshape in column-major then transpose
+            response_left = resp_left_full.reshape(response_height, response_width, order='F')
+            response_right = resp_right_full.reshape(response_height, response_width, order='F')
+
         elif left_provided:
-            resp_flat = layer_output.flatten()
-            response_left = resp_flat.reshape(response_height, response_width, order='F')
+            resp_sparse = layer_output.flatten()
+            resp_full = resp_sparse @ interp_matrix
+            response_left = resp_full.reshape(response_height, response_width, order='F')
+
         elif right_provided:
-            resp_flat = layer_output.flatten()
-            response_right = resp_flat.reshape(response_height, response_width, order='F')
+            resp_sparse = layer_output.flatten()
+            resp_full = resp_sparse @ interp_matrix
+            response_right = resp_full.reshape(response_height, response_width, order='F')
 
         # Flip right response back (like C++ line 615)
         if response_right is not None:
@@ -1018,5 +1041,160 @@ def im2col_bias(input_patch, width, height):
 
             # Store in output (skip first column which is bias=1.0)
             output[row_idx, 1:] = patch_flat
+
+    return output
+
+
+# Global cache for interpolation matrices (same for all experts at same scale)
+_INTERPOLATION_MATRIX_CACHE = {}
+
+
+def get_interpolation_matrix(response_height, response_width, input_height, input_width):
+    """
+    Get or create interpolation matrix for sparse-to-full response mapping.
+
+    Matches C++ interpolationMatrix() exactly.
+
+    Caches matrices since they only depend on dimensions (not landmark or image).
+
+    Args:
+        response_height: Height of response map
+        response_width: Width of response map
+        input_height: Height of input area of interest
+        input_width: Width of input area of interest
+
+    Returns:
+        map_matrix: (num_sparse, response_height * response_width) interpolation matrix
+    """
+    cache_key = (response_height, response_width, input_height, input_width)
+    if cache_key in _INTERPOLATION_MATRIX_CACHE:
+        return _INTERPOLATION_MATRIX_CACHE[cache_key]
+
+    m = input_height
+    n = input_width
+
+    # C++ hardcodes 11x11 patch size (width_support/height_support)
+    yB = m - 11 + 1
+    xB = n - 11 + 1
+
+    # Number of computed (non-skipped) sparse outputs
+    out_size = (yB * xB - 1) // 2
+
+    # Create map matrix: out_size x (response_height * response_width)
+    map_matrix = np.zeros((out_size, response_height * response_width), dtype=np.float32)
+
+    # Create value_id_matrix that maps sparse output indices
+    # C++ assigns index to positions where k % 2 != 0
+    value_id_matrix = np.zeros((response_width, response_height), dtype=np.int32)
+
+    ind = 0
+    for k in range(response_width * response_height):
+        if k % 2 != 0:
+            value_id_matrix.flat[k] = ind
+            ind += 1
+
+    # C++ transposes the value_id_matrix
+    value_id_matrix = value_id_matrix.T
+
+    # Fill the map_matrix with interpolation weights
+    skip_counter = 0
+    for x in range(response_width):
+        for y in range(response_height):
+            mapping_col = x * response_height + y
+            skip_counter += 1
+
+            if skip_counter % 2 == 0:
+                # This position was computed directly (weight = 1)
+                val_id = value_id_matrix[y, x]
+                map_matrix[val_id, mapping_col] = 1.0
+            else:
+                # This position was skipped - average from neighbors
+                num_neigh = 0.0
+                val_ids = []
+
+                if x - 1 >= 0:
+                    num_neigh += 1
+                    val_ids.append(value_id_matrix[y, x - 1])
+                if y - 1 >= 0:
+                    num_neigh += 1
+                    val_ids.append(value_id_matrix[y - 1, x])
+                if x + 1 < response_width:
+                    num_neigh += 1
+                    val_ids.append(value_id_matrix[y, x + 1])
+                if y + 1 < response_height:
+                    num_neigh += 1
+                    val_ids.append(value_id_matrix[y + 1, x])
+
+                for val_id in val_ids:
+                    map_matrix[val_id, mapping_col] = 1.0 / num_neigh
+
+    _INTERPOLATION_MATRIX_CACHE[cache_key] = map_matrix
+    return map_matrix
+
+
+def im2col_bias_sparse_contrast_norm(input_patch, width, height):
+    """
+    Sparse im2col with contrast normalization.
+
+    Matches C++ im2colBiasSparseContrastNorm() exactly:
+    - Skips every other patch in the iteration order
+    - Applies contrast normalization inline
+
+    Args:
+        input_patch: Image patch (m, n) as float32
+        width: Sliding window width (typically 11)
+        height: Sliding window height (typically 11)
+
+    Returns:
+        output: Matrix (num_sparse, width*height+1) normalized patches with bias
+    """
+    m = input_patch.shape[0]
+    n = input_patch.shape[1]
+
+    yB = m - height + 1
+    xB = n - width + 1
+
+    out_size = (yB * xB - 1) // 2
+    patch_size = height * width
+
+    output = np.ones((out_size, patch_size + 1), dtype=np.float32)
+
+    row_idx = 0
+    skip_counter = 0
+
+    for j in range(xB):
+        for i in range(yB):
+            skip_counter += 1
+            if (skip_counter + 1) % 2 == 0:  # Skip when (skipCounter + 1) % 2 == 0
+                continue
+
+            # Extract patch values in column-major order (xx outer, yy inner)
+            patch_sum = 0.0
+            for yy in range(height):
+                for xx in range(width):
+                    col_idx = xx * height + yy + 1  # +1 for bias column
+                    val = input_patch[i + yy, j + xx]
+                    output[row_idx, col_idx] = val
+                    patch_sum += val
+
+            # Compute mean
+            mean = patch_sum / patch_size
+
+            # Compute L2 norm of (patch - mean)
+            sum_sq = 0.0
+            for k in range(1, patch_size + 1):
+                diff = output[row_idx, k] - mean
+                output[row_idx, k] = diff
+                sum_sq += diff * diff
+
+            norm = np.sqrt(sum_sq)
+            if norm == 0:
+                norm = 1.0
+
+            # Normalize
+            for k in range(1, patch_size + 1):
+                output[row_idx, k] /= norm
+
+            row_idx += 1
 
     return output

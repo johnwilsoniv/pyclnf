@@ -77,6 +77,13 @@ CONVERGENCE_PROFILES: Dict[str, Dict[str, Any]] = {
         'nonrigid_iterations': 5,
         'min_iterations': 1,  # Can converge faster with warm-start
         'description': 'Optimized for video with temporal warm-start'
+    },
+    'cpp_match': {
+        'convergence_threshold': 0.01,  # C++ OpenFace uses 0.01
+        'rigid_iterations': 5,  # C++ uses num_optimisation_iteration=5
+        'nonrigid_iterations': 5,  # Same for both phases in C++
+        'min_iterations': 1,
+        'description': 'Exact C++ OpenFace matching parameters'
     }
 }
 
@@ -237,6 +244,10 @@ class NURLMSOptimizer:
 
         # Temporal warm-start support (for video mode)
         self.previous_frame_landmarks = None
+
+        # Response map saving hook for debugging/comparison
+        self.save_response_maps_dir = None
+        self._save_call_count = 0
         self.previous_frame_params = None
         self.use_temporal_warmstart = (convergence_profile == 'video')
 
@@ -277,14 +288,19 @@ class NURLMSOptimizer:
         if not self.use_scale_adaptation:
             return self._base_regularization, self._base_sigma, self._base_weight_multiplier
 
+        # C++ clamps scale to max 0.5 before computing adaptation
+        # (LandmarkDetectorModel.cpp line 941: scale = min(scale, 2) where 2 is scale_idx)
+        # This prevents regularization from becoming negative at larger scales
+        clamped_scale = min(patch_scaling, 0.5)
+
         # Compute log ratio like C++: log(scale/0.25) / log(2)
-        # For scale=0.25: ratio=0, for scale=0.5: ratio=1, for scale=1.0: ratio=2
-        if patch_scaling <= 0.25:
+        # For scale=0.25: ratio=0, for scale=0.5: ratio=1
+        if clamped_scale <= 0.25:
             log_ratio = 0.0
         else:
-            log_ratio = math.log(patch_scaling / 0.25) / math.log(2)
+            log_ratio = math.log(clamped_scale / 0.25) / math.log(2)
 
-        # Adapt regularization: decreases as scale increases
+        # Adapt regularization: decreases as scale increases (max decrease is 15 at scale 0.5)
         adapted_reg = self._base_regularization - 15 * log_ratio
         if adapted_reg <= 0:
             adapted_reg = 0.001  # C++ minimum threshold
@@ -296,6 +312,47 @@ class NURLMSOptimizer:
         adapted_weight = self._base_weight_multiplier + 2 * self._base_weight_multiplier * log_ratio
 
         return adapted_reg, adapted_sigma, adapted_weight
+
+    def save_response_maps(self, response_maps: dict, window_size: int, patch_scaling: float, call_idx: int = None):
+        """
+        Save response maps to binary files for comparison with C++.
+
+        File format matches C++ OpenFace debug output:
+        - 8-byte header: rows (int32), cols (int32)
+        - Body: float64 values in row-major order
+
+        Filenames: response_lm{idx}_scale{scale:.2f}_ws{ws}.bin
+
+        Args:
+            response_maps: Dict mapping landmark_idx -> response_map (ws, ws)
+            window_size: Response map window size
+            patch_scaling: Current patch scale
+            call_idx: Optional call index for uniqueness (default: auto-increment)
+        """
+        if self.save_response_maps_dir is None:
+            return
+
+        import os
+        os.makedirs(self.save_response_maps_dir, exist_ok=True)
+
+        if call_idx is None:
+            call_idx = self._save_call_count
+            self._save_call_count += 1
+
+        for landmark_idx, response_map in response_maps.items():
+            # Filename matches C++ format
+            filename = f"response_lm{landmark_idx:02d}_scale{patch_scaling:.2f}_ws{window_size}_call{call_idx}.bin"
+            filepath = os.path.join(self.save_response_maps_dir, filename)
+
+            # Write in C++ format: int32 rows, int32 cols, then float64 data
+            with open(filepath, 'wb') as f:
+                rows, cols = response_map.shape
+                f.write(np.array([rows], dtype=np.int32).tobytes())
+                f.write(np.array([cols], dtype=np.int32).tobytes())
+                f.write(response_map.astype(np.float64).tobytes())
+
+        if self.debug_mode:
+            print(f"[SAVE] Saved {len(response_maps)} response maps to {self.save_response_maps_dir}")
 
     def optimize(self,
                  pdm,
@@ -353,9 +410,15 @@ class NURLMSOptimizer:
         # OpenFace behavior (see PDM.cpp line 613 and LandmarkDetectorModel.cpp):
         # - weight_factor > 0: W = weight_factor · diag(patch_confidences)  [NU-RLMS mode]
         # - weight_factor = 0: W = Identity  [Video mode - all landmarks weighted equally]
+        #
+        # CRITICAL: Weight matrix must be in STACKED format to match Jacobian/mean-shift:
+        #   Jacobian rows: [x0, x1, ..., xn-1, y0, y1, ..., yn-1]
+        #   Weight diag:   [w0, w1, ..., wn-1, w0, w1, ..., wn-1]
+        # NOT INTERLEAVED: [w0, w0, w1, w1, ...] (WRONG!)
         if adapted_weight > 0:
             # NU-RLMS mode: apply adapted weight multiplier to patch confidences
-            W = adapted_weight * np.diag(np.repeat(weights, 2))
+            # STACKED format: concatenate weights for x-components then y-components
+            W = adapted_weight * np.diag(np.concatenate([weights, weights]))
         else:
             # Video mode: use identity matrix (all landmarks weighted equally)
             W = np.eye(n_landmarks * 2)
@@ -408,6 +471,9 @@ class NURLMSOptimizer:
             self.cached_response_maps = response_maps
             self.cached_landmarks = landmarks_2d_initial.copy()
             self.cache_age = 0
+
+            # Save response maps if directory is configured
+            self.save_response_maps(response_maps, window_size, patch_scaling)
 
         # Debug: Print initial landmarks
         if self.debug_mode:
@@ -584,6 +650,20 @@ class NURLMSOptimizer:
 
             # Compute full Jacobian (global + local)
             J = pdm.compute_jacobian(params)
+
+            # DEBUG: Check mean_shift right before solve
+            if window_size == 11 and nonrigid_iter == 0 and self.debug_mode:
+                n_lm = len(mean_shift) // 2
+                ms_x = mean_shift[:n_lm]
+                ms_y = mean_shift[n_lm:]
+                ms_x_sum = np.sum(ms_x)
+                ms_y_sum = np.sum(ms_y)
+                print(f"\n[DEBUG][BEFORE_SOLVE] WS{window_size} nonrigid_iter{nonrigid_iter}:")
+                print(f"[DEBUG]   n_landmarks = {n_lm}")
+                print(f"[DEBUG]   ms_x[:5] = {ms_x[:5]}")
+                print(f"[DEBUG]   ms_x_sum = {ms_x_sum:.6f}, ms_y_sum = {ms_y_sum:.6f}")
+                print(f"[DEBUG]   ms_x abs_sum = {np.sum(np.abs(ms_x)):.4f}")
+                print(f"[DEBUG]   ms_x positive = {(ms_x > 0).sum()}, negative = {(ms_x < 0).sum()}, zero = {(ms_x == 0).sum()}")
 
             # Solve for full parameter update with regularization
             delta_p = self._solve_update(J, mean_shift, W, Lambda_inv, params, nonrigid_iter, window_size)
@@ -876,10 +956,16 @@ class NURLMSOptimizer:
                             response_maps[landmark_idx] = resp_right
                     else:
                         # Fallback to individual processing if AOI extraction failed
+                        # Still use response_sparse with None for missing side to match C++
                         if aoi_left is not None:
-                            response_maps[left_idx] = real_expert.response(aoi_left)
+                            resp_left, _ = real_expert.response_sparse(aoi_left, None)
+                            if resp_left is not None:
+                                response_maps[left_idx] = resp_left
                         if aoi_right is not None:
-                            response_maps[landmark_idx] = patch_expert.response(aoi_right)
+                            # Right side uses mirrored expert which internally uses real_expert
+                            resp_right, _ = real_expert.response_sparse(None, aoi_right)
+                            if resp_right is not None:
+                                response_maps[landmark_idx] = resp_right
 
                     processed.add(left_idx)
                     processed.add(landmark_idx)
@@ -918,11 +1004,15 @@ class NURLMSOptimizer:
                         if resp_right is not None:
                             response_maps[mirror_idx] = resp_right
                     else:
-                        # Fallback
+                        # Fallback - use response_sparse with None for missing side to match C++
                         if aoi_left is not None:
-                            response_maps[landmark_idx] = patch_expert.response(aoi_left)
+                            resp_left, _ = patch_expert.response_sparse(aoi_left, None)
+                            if resp_left is not None:
+                                response_maps[landmark_idx] = resp_left
                         if aoi_right is not None:
-                            response_maps[mirror_idx] = patch_experts[mirror_idx].response(aoi_right)
+                            _, resp_right = patch_expert.response_sparse(None, aoi_right)
+                            if resp_right is not None:
+                                response_maps[mirror_idx] = resp_right
 
                     processed.add(landmark_idx)
                     processed.add(mirror_idx)
@@ -1057,6 +1147,14 @@ class NURLMSOptimizer:
                 b_mat = sim_ref_to_img[1, 0]
                 ms_x = a_mat * ms_ref_x - b_mat * ms_ref_y
                 ms_y = b_mat * ms_ref_x + a_mat * ms_ref_y
+
+                # DEBUG: Print transform for landmark 0 in non-rigid iter 0
+                if landmark_idx == 0 and iteration == 0 and window_size == 11 and self.debug_mode:
+                    print(f"\n[DEBUG][TRANSFORM] LM0 iter0 WS11:")
+                    print(f"[DEBUG]   ms_ref = ({ms_ref_x:.4f}, {ms_ref_y:.4f})")
+                    print(f"[DEBUG]   a_mat = {a_mat:.4f}, b_mat = {b_mat:.4f}")
+                    print(f"[DEBUG]   ms_img = ({ms_x:.4f}, {ms_y:.4f})")
+                    print(f"[DEBUG]   offset_ref = ({offset_ref_x:.4f}, {offset_ref_y:.4f})")
             else:
                 ms_x = ms_ref_x
                 ms_y = ms_ref_y
@@ -1363,14 +1461,14 @@ class NURLMSOptimizer:
                 print(f"[PY][DEBUG]   sim_matrix:")
                 print(f"[PY][DEBUG]     {sim_matrix}")
 
-            # Check if this is CEN (has response() method) or CCNF (has compute_response())
-            if hasattr(patch_expert, 'response') and not hasattr(patch_expert, 'compute_response'):
-                # CEN: Call response() directly on area_of_interest - much faster!
-                # This matches C++ CEN_patch_expert::Response() exactly
+            # Check if this is CEN (has response_sparse() method) or CCNF (has compute_response())
+            if hasattr(patch_expert, 'response_sparse') and not hasattr(patch_expert, 'compute_response'):
+                # CEN: Use response_sparse() with None for right side to match C++ ResponseSparse
+                # This uses sparse computation + interpolation exactly like C++
 
-                # DEBUG: Check area_of_interest before calling response()
+                # DEBUG: Check area_of_interest before calling response_sparse()
                 if landmark_idx in (36, 42) and iteration == 0 and self.debug_mode and not is_mirror_patch:
-                    print(f"[PY][DEBUG][LM{landmark_idx}] area_of_interest BEFORE response():")
+                    print(f"[PY][DEBUG][LM{landmark_idx}] area_of_interest BEFORE response_sparse():")
                     print(f"[PY][DEBUG][LM{landmark_idx}]   dtype: {area_of_interest.dtype}, shape: {area_of_interest.shape}")
                     print(f"[PY][DEBUG][LM{landmark_idx}]   min={area_of_interest.min()}, max={area_of_interest.max()}, mean={area_of_interest.mean():.1f}")
                     print(f"[PY][DEBUG][LM{landmark_idx}]   sum={area_of_interest.sum()}")
@@ -1382,7 +1480,8 @@ class NURLMSOptimizer:
                     # Save a copy to compare
                     np.save(f'/tmp/area_of_interest_lm{landmark_idx}_before_response.npy', area_of_interest.copy())
 
-                response_map = patch_expert.response(area_of_interest)
+                # Use response_sparse with None for right side (like C++ with empty mat)
+                response_map, _ = patch_expert.response_sparse(area_of_interest, None)
 
                 # DEBUG: Check response_map after calling response()
                 if landmark_idx in (36, 42) and iteration == 0 and self.debug_mode and not is_mirror_patch:
@@ -1409,9 +1508,9 @@ class NURLMSOptimizer:
                         response_map[i, j] = patch_expert.compute_response(patch)
         else:
             # NO WARPING: Direct extraction from image (not typically used with OpenFace)
-            # Check if this is CEN (has response() method) or CCNF (has compute_response())
-            if hasattr(patch_expert, 'response') and not hasattr(patch_expert, 'compute_response'):
-                # CEN: Extract area_of_interest and call response()
+            # Check if this is CEN (has response_sparse() method) or CCNF (has compute_response())
+            if hasattr(patch_expert, 'response_sparse') and not hasattr(patch_expert, 'compute_response'):
+                # CEN: Extract area_of_interest and call response_sparse()
                 # Calculate area size needed
                 if hasattr(patch_expert, 'width_support'):
                     patch_dim = max(patch_expert.width_support, patch_expert.height_support)
@@ -1431,7 +1530,7 @@ class NURLMSOptimizer:
                 # Ensure bounds
                 if x1 >= 0 and y1 >= 0 and x2 <= image.shape[1] and y2 <= image.shape[0]:
                     area_of_interest = image[y1:y2, x1:x2]
-                    response_map = patch_expert.response(area_of_interest)
+                    response_map, _ = patch_expert.response_sparse(area_of_interest, None)
                 else:
                     # Out of bounds - use low response
                     response_map[:] = -1e10
@@ -1630,6 +1729,16 @@ class NURLMSOptimizer:
         # Compute right-hand side: b = J^T·W·v
         b = J_rigid.T @ W @ v  # (6,)
 
+        # DEBUG: Print values matching C++ format
+        if self.debug_mode and iteration == 0 and window_size == 11:
+            print(f"\n[PY][ITER0_WS11_RIGID] Solving rigid update:")
+            print(f"[PY][ITER0_WS11_RIGID] J_w_t_m (J^T W v) (size {len(b)}):")
+            for i, val in enumerate(b):
+                print(f"[PY][ITER0_WS11_RIGID]   J_w_t_m[{i}]: {val:.8f}")
+            print(f"[PY][ITER0_WS11_RIGID] Hessian diagonal (first 6):")
+            for i in range(min(6, A.shape[0])):
+                print(f"[PY][ITER0_WS11_RIGID]   Hessian[{i},{i}]: {A[i,i]:.8f}")
+
         # Solve linear system: A·Δp = b using Cholesky (matches C++ cv::DECOMP_CHOLESKY)
         try:
             L = np.linalg.cholesky(A)
@@ -1642,9 +1751,15 @@ class NURLMSOptimizer:
             except np.linalg.LinAlgError:
                 delta_p_rigid = np.linalg.lstsq(A, b, rcond=None)[0]
 
-        # Apply learning rate damping (OpenFace PDM.cpp line 677)
-        # C++ uses 0.75 damping for rigid parameters
-        delta_p_rigid = 0.75 * delta_p_rigid
+        # NOTE: No damping applied here - C++ OpenFace NU_RLMS does not apply damping
+        # The 0.75 damping previously here was incorrect - it's only used in CalcParams
+        # during initial pose estimation, not in the main optimization loop
+
+        # DEBUG: Print delta_p matching C++ format
+        if self.debug_mode and iteration == 0 and window_size == 11:
+            print(f"[PY][ITER0_WS11_RIGID] param_update (size {len(delta_p_rigid)}):")
+            for i, val in enumerate(delta_p_rigid):
+                print(f"[PY][ITER0_WS11_RIGID]   param_update[{i}]: {val:.8f}")
 
         return delta_p_rigid
 
@@ -1686,6 +1801,15 @@ class NURLMSOptimizer:
         reg_term = current_reg * Lambda_inv * params  # (m,)
         b = JtWv - reg_term
 
+        # DEBUG: Check mean-shift sums for translation
+        if window_size == 11 and iteration == 0 and self.debug_mode:
+            n_lm = len(v) // 2
+            v_x_sum = np.sum(v[:n_lm])
+            v_y_sum = np.sum(v[n_lm:])
+            print(f"\n[DEBUG][SOLVE_UPDATE] WS{window_size} iter{iteration}:")
+            print(f"[DEBUG]   v_x_sum = {v_x_sum:.4f}, v_y_sum = {v_y_sum:.4f}")
+            print(f"[DEBUG]   JtWv[4] (tx) = {JtWv[4]:.4f}, JtWv[5] (ty) = {JtWv[5]:.4f}")
+
         # Solve linear system: A·Δp = b using Cholesky decomposition
         # C++ OpenFace uses cv::DECOMP_CHOLESKY which is more numerically stable
         # for positive-definite systems (guaranteed by regularization)
@@ -1708,9 +1832,10 @@ class NURLMSOptimizer:
         self._last_jtw_norm = np.linalg.norm(JtWv)
         self._last_reg_term_norm = np.linalg.norm(reg_term)
 
-        # Apply learning rate damping (OpenFace PDM.cpp line 677)
-        # C++ uses 0.75 damping for all parameters
-        delta_p = 0.75 * delta_p
+        # NOTE: C++ NU_RLMS (LandmarkDetectorModel.cpp) does NOT apply 0.75 damping!
+        # The 0.75 damping in PDM.cpp CalcParams is for initial pose estimation only,
+        # NOT for the main optimization loop. Removed to match C++ behavior.
+        # OLD: delta_p = 0.75 * delta_p
 
         return delta_p
 
