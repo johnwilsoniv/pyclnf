@@ -213,6 +213,17 @@ Non-Uniform Regularized Landmark Mean-Shift optimization.
 - Scale-adaptive regularization and sigma
 - Convergence threshold: 0.01 (shape change norm)
 
+### 4. Hierarchical Refinement (Partial)
+
+C++ OpenFace has optional hierarchical sub-models for refinement:
+
+| Model | Landmarks | PyCLNF Status |
+|-------|-----------|---------------|
+| **Eye (28-point)** | 36-47 | ✓ Enabled |
+| **Inner** | 17-67 (eyebrows, nose, mouth) | ✗ Not implemented |
+
+The "inner" model refinement is **not implemented** in PyCLNF. Despite this, eyebrow accuracy is still excellent (0.10 px mean error in video mode). The inner model would add ~100MB of additional model data for marginal improvement.
+
 ## Performance
 
 | Metric | Value |
