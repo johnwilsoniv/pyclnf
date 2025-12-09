@@ -12,10 +12,10 @@ A pure Python implementation of OpenFace's CLNF facial landmark detector with bu
 
 - **100% Pure Python**: No C++ compilation required
 - **Built-in Face Detection**: Integrated PyMTCNN for automatic face detection
-- **OpenFace Compatible**: Uses original OpenFace trained models (CCNF patch experts)
+- **OpenFace Compatible**: Uses original OpenFace CEN (Convolutional Expert Network) patch experts
 - **Cross-Platform**: Works on Windows, macOS, Linux
 - **68-Point Landmarks**: Full facial landmark detection
-- **8.23px Accuracy**: Validated against C++ OpenFace
+- **Sub-pixel Accuracy**: 0.06-0.17 px mean error vs C++ OpenFace (video mode)
 - **No GPU Required**: CPU-based inference
 - **Simple API**: One-line face detection and landmark fitting
 
@@ -52,30 +52,36 @@ print(f"Face bbox: {info['bbox']}")
 print(f"Converged: {info['converged']} in {info['iterations']} iterations")
 ```
 
-### Manual Bounding Box (Alternative)
+### Manual Bounding Box with PyMTCNN
 
-If you have your own face detector or pre-computed bounding boxes:
+For maximum accuracy matching C++ OpenFace, use PyMTCNN with bbox calibration:
 
 ```python
-from pymtcnn import PyMTCNN
+from pymtcnn import MTCNN
 from pyclnf import CLNF
 import cv2
 
 # Initialize detectors
-mtcnn = PyMTCNN()
-clnf = CLNF(detector=False)  # Disable built-in detector
+mtcnn = MTCNN(backend='coreml')  # or 'onnx' for cross-platform
+clnf = CLNF()
 
-# Detect face with MTCNN
+# Detect face with PyMTCNN
 image = cv2.imread("face.jpg")
-bboxes, landmarks_5 = mtcnn.detect(image, return_landmarks=True)
+boxes, landmarks_5pt = mtcnn.detect(image)
 
-if len(bboxes) > 0:
-    # Convert PyMTCNN bbox from (x1, y1, x2, y2) to (x, y, width, height)
-    x1, y1, x2, y2 = bboxes[0]
-    bbox = (x1, y1, x2 - x1, y2 - y1)
+if boxes is not None and len(boxes) > 0:
+    # PyMTCNN returns (x, y, w, h, score) format
+    raw_x, raw_y, raw_w, raw_h = boxes[0][:4]
 
-    # Refine with CLNF
-    landmarks_68, info = clnf.fit(image, bbox)
+    # Apply OpenFace bbox calibration (matches C++ FaceDetectorMTCNN.cpp)
+    cal_x = raw_x + raw_w * (-0.0075)
+    cal_y = raw_y + raw_h * 0.2459
+    cal_w = raw_w * 1.0323
+    cal_h = raw_h * 0.7751
+    bbox = (cal_x, cal_y, cal_w, cal_h)
+
+    # Fit CLNF landmarks
+    landmarks_68, info = clnf.fit(image, face_bbox=bbox, detector_type=None)
 
     print(f"68 landmarks detected: {landmarks_68.shape}")
 ```
@@ -87,18 +93,42 @@ Input Image
     ↓
 Face Detection (PyMTCNN)
     ↓
-Face Bounding Box
+Bounding Box Calibration (OpenFace coefficients)
     ↓
 PDM Initialization (Mean Shape → Bbox)
     ↓
-CLNF Optimization
-  ├── CCNF Patch Experts (3 scales: 0.25, 0.35, 0.5)
-  ├── NU-RLMS Optimizer
-  ├── Hierarchical Refinement (3 window sizes)
+CLNF Optimization (4 window sizes: 11 → 9 → 7 → 5)
+  ├── CEN Patch Experts (4 scales: 0.25, 0.35, 0.5, 1.0)
+  ├── NU-RLMS Optimizer (rigid + non-rigid phases)
+  ├── Sparse Response Maps with Interpolation
   └── Shape Constraints (PCA-based PDM)
     ↓
 68 Facial Landmarks
 ```
+
+### Pipeline Details
+
+1. **Face Detection**: PyMTCNN detects faces and returns bounding boxes in `(x, y, w, h)` format
+
+2. **Bbox Calibration**: OpenFace calibration coefficients adjust the raw MTCNN bbox:
+   ```
+   cal_x = x + w × (-0.0075)
+   cal_y = y + h × 0.2459
+   cal_w = w × 1.0323
+   cal_h = h × 0.7751
+   ```
+
+3. **PDM Initialization**: Scale and translation computed from calibrated bbox
+
+4. **Multi-Scale Optimization**: Coarse-to-fine refinement through 4 window sizes:
+   - WS11 @ scale 0.25 (coarsest)
+   - WS9 @ scale 0.35
+   - WS7 @ scale 0.50
+   - WS5 @ scale 1.00 (finest)
+
+5. **Per-Scale Phases**:
+   - **Rigid phase** (10 iterations): Optimizes global pose (scale, rotation, translation)
+   - **Non-rigid phase** (5 iterations): Optimizes local shape deformations
 
 ## Components
 
@@ -109,30 +139,44 @@ Statistical shape model using PCA to represent plausible facial configurations.
 - **34 shape parameters** (principal components)
 - Rodrigues rotation for 3D → 2D projection
 
-### 2. CCNF Patch Experts
-Likelihood-based landmark position estimators trained on Multi-PIE dataset.
+### 2. CEN Patch Experts
+Convolutional Expert Network patch experts for landmark localization.
 
-- **1,032 patch experts** (344 per scale × 3 scales)
-- **3 scales**: 0.25, 0.35, 0.5
-- **7 views**: Multi-angle face support
-- **Model size**: 33MB (NumPy .npz files)
+- **272 patch experts** (68 landmarks × 4 scales)
+- **4 scales**: 0.25, 0.35, 0.5, 1.0
+- Sparse response computation with interpolation (matches C++ exactly)
+- Sigma components for spatial correlation modeling
+- **Model size**: ~410MB
 
 ### 3. NU-RLMS Optimizer
 Non-Uniform Regularized Landmark Mean-Shift optimization.
 
-- Iterative refinement in PDM parameter space
-- Hierarchical coarse-to-fine optimization
-- Patch confidence weighting
-- Converges in ~5-10 iterations
+- **Rigid phase**: 10 iterations for global pose
+- **Non-rigid phase**: 5 iterations for local shape (fewer iterations avoids jaw divergence)
+- Precomputed KDE grids for mean-shift (0.1 pixel spacing)
+- Scale-adaptive regularization and sigma
+- Convergence threshold: 0.01 (shape change norm)
 
 ## Performance
 
 | Metric | Value |
 |--------|-------|
-| **Accuracy** | 8.23px mean error vs C++ OpenFace |
+| **Accuracy** | 0.06-0.17 px mean error vs C++ OpenFace |
+| **Eye landmarks** | 0.05-0.09 px error |
+| **Jaw landmarks** | 0.08-0.44 px error |
 | **Speed** | ~2-3 FPS (pure NumPy) |
 | **Convergence** | 95%+ on frontal faces |
-| **Model Size** | 47MB |
+| **Model Size** | ~410MB (CEN patch experts) |
+
+### Accuracy Validation
+
+Tested on multiple images against C++ OpenFace (video mode, weight_factor=0):
+
+| Image | Mean Error | Jaw Error | Eye Error |
+|-------|------------|-----------|-----------|
+| test_frame_mtcnn.png | 0.06 px | 0.08 px | 0.05 px |
+| test_frame.png | 0.09 px | 0.17 px | 0.05 px |
+| test_face_clean.png | 0.17 px | 0.44 px | 0.09 px |
 
 ## Use Cases
 
@@ -151,11 +195,14 @@ Initialize CLNF landmark detector.
 **Parameters:**
 - `model_dir` (str): Path to model directory (default: "pyclnf/models")
 - `detector` (bool): Enable PyMTCNN face detector (default: True)
-- `regularization` (float): Shape constraint weight (default: 25.0)
-- `max_iterations` (int): Max optimization iterations (default: 10)
+- `regularization` (float): Shape constraint weight (default: 22.5)
+- `sigma` (float): KDE kernel sigma (default: 2.25)
+- `window_sizes` (list): Hierarchical window sizes (default: [11, 9, 7, 5])
+
+**Optimizer Settings** (access via `clnf.optimizer`):
+- `rigid_iterations` (int): Rigid phase iterations (default: 10)
+- `nonrigid_iterations` (int): Non-rigid phase iterations (default: 5)
 - `convergence_threshold` (float): Convergence threshold (default: 0.005)
-- `window_sizes` (list): Hierarchical window sizes (default: [19, 17, 15])
-- `sigma` (float): Patch expert kernel sigma (default: 1.5)
 
 ### `fit(image, face_bbox, initial_params, return_params)`
 
@@ -189,18 +236,23 @@ Detect face and fit landmarks in one call (requires built-in detector).
 
 ## Model Files
 
-PyCLNF uses OpenFace's trained CCNF models, exported to NumPy format:
+PyCLNF uses OpenFace's trained CEN models in binary format:
 
 ```
 pyclnf/models/
-├── exported_pdm/               # Point Distribution Model (36KB)
+├── exported_pdm/               # Point Distribution Model
 │   ├── mean_shape.npy
 │   ├── eigenvectors.npy
 │   └── eigenvalues.npy
-├── exported_ccnf_0.25/         # Coarse scale (11MB)
-├── exported_ccnf_0.35/         # Medium scale (11MB)
-├── exported_ccnf_0.5/          # Fine scale (11MB)
-└── sigma_components/           # KDE kernels for mean-shift
+├── cen_patches_0.25_of.dat     # Scale 0.25 patch experts (~100MB)
+├── cen_patches_0.35_of.dat     # Scale 0.35 patch experts (~100MB)
+├── cen_patches_0.5_of.dat      # Scale 0.50 patch experts (~100MB)
+├── cen_patches_1.0_of.dat      # Scale 1.00 patch experts (~100MB)
+└── sigma_components/           # Spatial correlation matrices for KDE
+    ├── sigma_components_ws7.npy
+    ├── sigma_components_ws9.npy
+    ├── sigma_components_ws11.npy
+    └── sigma_components_ws15.npy
 ```
 
 ## Requirements
