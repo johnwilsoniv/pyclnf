@@ -64,6 +64,7 @@ class CLNF:
                  detector_model_path: Optional[str] = None,
                  use_coreml: bool = False,
                  use_eye_refinement: bool = True,  # Enabled - matches C++ pipeline (0.15 px error vs C++ post-refinement)
+                 use_inner_refinement: bool = False,  # Disabled by default - experimental inner face refinement
                  debug_mode: bool = False,
                  tracked_landmarks: list = None,
                  use_shared_memory: bool = False,
@@ -199,6 +200,18 @@ class CLNF:
             except Exception as e:
                 print(f"Warning: Could not load eye refinement model: {e}")
                 self.use_eye_refinement = False
+
+        # Initialize inner face refinement model if enabled (experimental)
+        self.use_inner_refinement = use_inner_refinement
+        self.inner_model = None
+        if use_inner_refinement:
+            try:
+                from .core.inner_model import HierarchicalInnerModel
+                self.inner_model = HierarchicalInnerModel(str(self.model_dir))
+                print("✓ Inner refinement model loaded")
+            except Exception as e:
+                print(f"Warning: Could not load inner refinement model: {e}")
+                self.use_inner_refinement = False
 
         # Initialize face detector (PRIMARY: PyMTCNN with all performance optimizations)
         # Store detector type for bbox preprocessing in PDM initialization
@@ -402,7 +415,15 @@ class CLNF:
         # Extract final landmarks
         landmarks = self.pdm.params_to_landmarks_2d(optimized_params)
 
-        # Apply eye refinement if enabled
+        # Apply inner face refinement if enabled (landmarks 17-67)
+        if self.use_inner_refinement and self.inner_model is not None:
+            landmarks = self.inner_model.refine_landmarks(
+                gray, landmarks, optimized_params
+            )
+            if self.debug_mode:
+                print(f"[INNER_REFINE] Refined landmarks 17-67")
+
+        # Apply eye refinement if enabled (landmarks 36-47)
         eye_iteration_history = []
         if self.use_eye_refinement and self.eye_model is not None:
             # Refine left eye (landmarks 36-41)
