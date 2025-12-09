@@ -11,7 +11,7 @@ def align_shapes_with_scale(src_shape: np.ndarray, dst_shape: np.ndarray) -> np.
     Compute similarity transform (scale + rotation + translation) from src to dst.
 
     This matches OpenFace's Utilities::AlignShapesWithScale function, which computes
-    a 2D similarity transform that best aligns source landmarks to destination landmarks.
+    a 2D similarity transform using Kabsch algorithm (SVD-based rotation estimation).
 
     The transform is represented as a 2x3 matrix:
         [a  -b  tx]
@@ -30,48 +30,62 @@ def align_shapes_with_scale(src_shape: np.ndarray, dst_shape: np.ndarray) -> np.
     assert src_shape.shape == dst_shape.shape, "Shapes must have same dimensions"
     assert src_shape.shape[1] == 2, "Shapes must be 2D"
 
-    # Center shapes (remove translation)
+    n = src_shape.shape[0]
+
+    # Center shapes (remove translation) - matches C++ mean normalization
     src_mean = src_shape.mean(axis=0)
     dst_mean = dst_shape.mean(axis=0)
 
     src_centered = src_shape - src_mean
     dst_centered = dst_shape - dst_mean
 
-    # Compute scales (for normalization)
-    # Note: C++ uses RMS (divide by n) but uses SVD-based Kabsch for rotation.
-    # Python uses simplified dot-product rotation that requires total-variance normalization.
-    # These are mathematically equivalent but use different conventions.
-    src_scale = np.sqrt((src_centered ** 2).sum())
-    dst_scale = np.sqrt((dst_centered ** 2).sum())
+    # Compute RMS scales (matches C++ exactly: sqrt(sum/n))
+    # C++ line 221-222: s_src = sqrt(cv::sum(src_sq)[0] / n)
+    src_scale = np.sqrt((src_centered ** 2).sum() / n)
+    dst_scale = np.sqrt((dst_centered ** 2).sum() / n)
 
-    # Normalize shapes to unit scale
-    src_norm = src_centered / (src_scale + 1e-8)
-    dst_norm = dst_centered / (dst_scale + 1e-8)
+    # Normalize shapes to unit RMS scale
+    src_norm = src_centered / (src_scale + 1e-10)
+    dst_norm = dst_centered / (dst_scale + 1e-10)
 
-    # Compute rotation parameters (a, b)
-    # a = cos(θ), b = sin(θ) in the rotation matrix
-    a = (src_norm * dst_norm).sum()
-    b = (src_norm[:, 0] * dst_norm[:, 1] - src_norm[:, 1] * dst_norm[:, 0]).sum()
+    # Kabsch algorithm: compute rotation using SVD (matches C++ AlignShapesKabsch2D)
+    # C++ line 171: svd(align_from.t() * align_to)
+    # Note: src_norm is (n, 2), so src_norm.T @ dst_norm gives (2, 2) cross-covariance
+    H = src_norm.T @ dst_norm  # (2, 2) cross-covariance matrix
+
+    # SVD decomposition
+    U, S, Vt = np.linalg.svd(H)
+
+    # Ensure proper rotation (no reflection)
+    # C++ line 175: d = determinant(vt.t() * u.t())
+    d = np.linalg.det(Vt.T @ U.T)
+    corr = np.eye(2)
+    if d < 0:
+        corr[1, 1] = -1
+
+    # Rotation matrix: R = V * corr * U^T
+    # C++ line 188: R = vt.t() * corr * u.t()
+    R = Vt.T @ corr @ U.T
 
     # Overall scale factor
-    scale = dst_scale / (src_scale + 1e-8)
+    scale = dst_scale / (src_scale + 1e-10)
 
     # Build 2x3 similarity transform matrix
-    # Apply: dst = [[a -b][b a]] * scale * (src - src_mean) + dst_mean
-    #           = [[sa -sb][sb sa]] * src + [tx, ty]
-    # where tx = dst_mean_x - sa*src_mean_x + sb*src_mean_y
-    #       ty = dst_mean_y - sb*src_mean_x - sa*src_mean_y
+    # A = s * R (matches C++ line 233)
+    # For a proper rotation R = [[cos, -sin], [sin, cos]]
+    # So A = [[s*cos, -s*sin], [s*sin, s*cos]]
+    A = scale * R
 
-    sa = scale * a
-    sb = scale * b
+    # Translation: dst_mean = A @ src_mean + t  =>  t = dst_mean - A @ src_mean
+    t = dst_mean - A @ src_mean
 
-    tx = dst_mean[0] - (sa * src_mean[0] - sb * src_mean[1])
-    ty = dst_mean[1] - (sb * src_mean[0] + sa * src_mean[1])
-
+    # The transform matrix directly uses A (which already has correct signs)
+    # Standard form: [[a, -b, tx], [b, a, ty]] where a=s*cos, b=s*sin
+    # A[0,0]=s*cos, A[0,1]=-s*sin, A[1,0]=s*sin, A[1,1]=s*cos
     transform = np.array([
-        [sa, -sb, tx],
-        [sb,  sa, ty]
-    ], dtype=np.float64)  # Use float64 for precision (matches C++ double)
+        [A[0, 0], A[0, 1], t[0]],
+        [A[1, 0], A[1, 1], t[1]]
+    ], dtype=np.float64)
 
     return transform
 
