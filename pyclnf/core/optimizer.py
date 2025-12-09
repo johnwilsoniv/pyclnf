@@ -72,9 +72,9 @@ CONVERGENCE_PROFILES: Dict[str, Dict[str, Any]] = {
         'description': 'Speed priority, <1.0px error increase'
     },
     'video': {
-        'convergence_threshold': 0.5,  # Moderate relaxation
-        'rigid_iterations': 3,
-        'nonrigid_iterations': 5,
+        'convergence_threshold': 0.005,  # Gold standard (matches C++ accuracy)
+        'rigid_iterations': 10,  # More rigid iterations for jaw accuracy (Dec 8th fix)
+        'nonrigid_iterations': 5,  # Fewer nonrigid to avoid divergence
         'min_iterations': 1,  # Can converge faster with warm-start
         'description': 'Optimized for video with temporal warm-start'
     },
