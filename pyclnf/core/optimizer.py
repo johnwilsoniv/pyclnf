@@ -51,11 +51,11 @@ from .cen_patch_expert import MirroredCENPatchExpert, CENPatchExpert
 
 CONVERGENCE_PROFILES: Dict[str, Dict[str, Any]] = {
     'accurate': {
-        'convergence_threshold': 0.1,  # Original - strictest
-        'rigid_iterations': 6,
-        'nonrigid_iterations': 10,
-        'min_iterations': 3,
-        'description': 'Highest accuracy, original OpenFace settings'
+        'convergence_threshold': 0.01,  # C++ OpenFace uses 0.01
+        'rigid_iterations': 5,  # C++ uses num_optimisation_iteration=5
+        'nonrigid_iterations': 5,  # Same for both phases in C++
+        'min_iterations': 1,
+        'description': 'Matches C++ OpenFace settings exactly'
     },
     'optimized': {
         'convergence_threshold': 0.3,  # Conservative relaxation
@@ -80,10 +80,10 @@ CONVERGENCE_PROFILES: Dict[str, Dict[str, Any]] = {
     },
     'cpp_match': {
         'convergence_threshold': 0.01,  # C++ OpenFace uses 0.01
-        'rigid_iterations': 5,  # C++ uses num_optimisation_iteration=5
-        'nonrigid_iterations': 5,  # Same for both phases in C++
+        'rigid_iterations': 10,  # More rigid iterations for better convergence
+        'nonrigid_iterations': 5,  # Fewer nonrigid to avoid divergence
         'min_iterations': 1,
-        'description': 'Exact C++ OpenFace matching parameters'
+        'description': 'Optimized for matching C++ OpenFace results'
     }
 }
 
@@ -164,6 +164,64 @@ def _kde_mean_shift_numba(response_map: np.ndarray,
     return ms_x, ms_y
 
 
+@jit(nopython=True, cache=True)
+def _kde_mean_shift_direct(response_map: np.ndarray,
+                           dx: float,
+                           dy: float,
+                           a: float) -> Tuple[float, float]:
+    """
+    Direct KDE-based mean-shift computation without precomputed grid.
+
+    This computes KDE weights directly at the actual (dx, dy) position,
+    avoiding the grid snapping that causes systematic errors to cancel
+    to zero when summed across landmarks.
+
+    Args:
+        response_map: Patch expert response map (window_size, window_size)
+        dx: Current x offset within response map (clamped)
+        dy: Current y offset within response map (clamped)
+        a: Gaussian kernel parameter (-0.5 / sigma^2)
+
+    Returns:
+        (ms_x, ms_y): Mean-shift in x and y directions
+    """
+    resp_size = response_map.shape[0]
+
+    # Compute weighted mean-shift with direct KDE weights
+    mx = 0.0
+    my = 0.0
+    total_weight = 0.0
+
+    for ii in range(resp_size):
+        for jj in range(resp_size):
+            # Get response value at this position
+            resp_val = response_map[ii, jj]
+
+            # Compute KDE weight directly at actual (dx, dy) position
+            # dist_x = dx - jj (x-distance from current position to pixel jj)
+            # dist_y = dy - ii (y-distance from current position to pixel ii)
+            dist_x = dx - jj
+            dist_y = dy - ii
+            kde_weight = np.exp(a * (dist_x * dist_x + dist_y * dist_y))
+
+            # Combined weight
+            weight = resp_val * kde_weight
+
+            total_weight += weight
+            mx += weight * jj
+            my += weight * ii
+
+    # Compute mean-shift
+    if total_weight > 1e-10:
+        ms_x = (mx / total_weight) - dx
+        ms_y = (my / total_weight) - dy
+    else:
+        ms_x = 0.0
+        ms_y = 0.0
+
+    return ms_x, ms_y
+
+
 class NURLMSOptimizer:
     """
     NU-RLMS optimizer for CLNF parameter estimation.
@@ -186,7 +244,9 @@ class NURLMSOptimizer:
                  weight_multiplier: float = 0.0,  # C++ video mode (disabled)
                  debug_mode: bool = False,
                  tracked_landmarks: list = None,
-                 convergence_profile: str = None):
+                 convergence_profile: str = None,
+                 use_peak_confidence: bool = False,
+                 use_direct_kde: bool = False):  # False matches C++ precomputed KDE grids
         """
         Initialize NU-RLMS optimizer.
 
@@ -209,6 +269,13 @@ class NURLMSOptimizer:
             tracked_landmarks: Landmarks to track in detail when debug_mode=True (default: [36, 48, 30, 8])
             convergence_profile: Named profile ('accurate', 'optimized', 'fast', 'video')
                                If provided, overrides max_iterations and convergence_threshold
+            use_peak_confidence: Enable dynamic peak confidence weighting.
+                               Reduces influence of landmarks with flat/ambiguous response peaks.
+                               Helps improve accuracy on low-contrast image regions.
+            use_direct_kde: Use direct KDE computation instead of precomputed grid.
+                           Default True to fix zero-sum bug in precomputed grid approach.
+                           The precomputed grid snaps positions to 0.1px causing systematic
+                           errors that cancel to zero when summed across landmarks.
         """
         self.regularization = regularization
         self.sigma = sigma
@@ -216,6 +283,8 @@ class NURLMSOptimizer:
         self.kde_cache = {}  # Cache for precomputed KDE kernels
         self.debug_mode = debug_mode
         self.tracked_landmarks = tracked_landmarks if tracked_landmarks is not None else [36, 48, 30, 8]
+        self.use_peak_confidence = use_peak_confidence
+        self.use_direct_kde = use_direct_kde
 
         # Apply convergence profile if specified
         self.convergence_profile_name = convergence_profile
@@ -228,10 +297,11 @@ class NURLMSOptimizer:
             self.min_iterations = profile['min_iterations']
         else:
             # Use explicit parameters
+            # Default: R=10, NR=5 for best accuracy (fewer nonrigid avoids divergence)
             self.convergence_threshold = convergence_threshold
             self.max_iterations = max_iterations
-            self.rigid_iterations = max_iterations
-            self.nonrigid_iterations = max_iterations
+            self.rigid_iterations = 10  # More rigid iterations for better convergence
+            self.nonrigid_iterations = 5  # Fewer nonrigid to avoid jaw divergence
             self.min_iterations = 2  # Default minimum
 
         # Response map caching for video-mode temporal coherence
@@ -475,6 +545,31 @@ class NURLMSOptimizer:
             # Save response maps if directory is configured
             self.save_response_maps(response_maps, window_size, patch_scaling)
 
+        # =================================================================
+        # DYNAMIC PEAK CONFIDENCE WEIGHTING
+        # Reduce influence of landmarks with weak/ambiguous response peaks
+        # Only apply at larger window sizes (WS >= 9) where divergence originates
+        # At smaller window sizes, response maps are naturally less peaked
+        # =================================================================
+        if self.use_peak_confidence and window_size >= 9:
+            peak_confidences = self._compute_peak_confidences(response_maps, n_landmarks)
+
+            # Apply a gentler formula: sqrt(conf) to reduce penalty
+            # This gives weak landmarks more influence than linear scaling
+            peak_confidences = np.sqrt(peak_confidences)
+
+            # Modify weight matrix W to incorporate peak confidences
+            # W is currently: adapted_weight * diag([weights, weights])
+            # We multiply each weight by its peak confidence
+            for i in range(n_landmarks):
+                W[i, i] *= peak_confidences[i]
+                W[i + n_landmarks, i + n_landmarks] *= peak_confidences[i]
+
+            if self.debug_mode:
+                low_conf_lms = [i for i in range(n_landmarks) if peak_confidences[i] < 0.7]
+                if low_conf_lms:
+                    print(f"[PEAK_CONF] WS{window_size} reduced-confidence landmarks: {low_conf_lms}")
+
         # Debug: Print initial landmarks
         if self.debug_mode:
             print(f"\n[PY][ITER0_WS{window_size}] Initial landmark positions:")
@@ -581,6 +676,11 @@ class NURLMSOptimizer:
             print(f"[PY][RIGID_COMPLETE] Rigid params after {rigid_iter + 1} iterations:")
             print(f"[PY][RIGID_COMPLETE]   scale: {params[0]:.6f}")
             print(f"[PY][RIGID_COMPLETE]   rotation: ({params[1]:.6f}, {params[2]:.6f}, {params[3]:.6f})")
+            # Print LM5 position after rigid phase
+            rigid_landmarks = pdm.params_to_landmarks_2d(params)
+            for lm_idx in self.tracked_landmarks:
+                if lm_idx < len(rigid_landmarks):
+                    print(f"[PY][RIGID_COMPLETE]   Landmark_{lm_idx}: ({rigid_landmarks[lm_idx][0]:.4f}, {rigid_landmarks[lm_idx][1]:.4f})")
 
         # =================================================================
         # PHASE 2: NON-RIGID optimization with inner convergence loop
@@ -648,11 +748,16 @@ class NURLMSOptimizer:
                         ms_mag = np.sqrt(ms_x**2 + ms_y**2)
                         print(f"[PY][ITER0_WS{window_size}]   Landmark_{lm_idx}: ms=({ms_x:.4f}, {ms_y:.4f}) mag={ms_mag:.4f}")
 
+            # DEBUG: Print params BEFORE Jacobian for WS9 nonrigid iter 0
+            if window_size == 9 and nonrigid_iter == 0 and self.debug_mode:
+                print(f"\n[PY][JACOBIAN_INPUT_WS9] params: scale={params[0]:.4f} rot=({params[1]:.4f}, {params[2]:.4f}, {params[3]:.4f}) tx={params[4]:.4f} ty={params[5]:.4f}")
+                print(f"[PY][JACOBIAN_INPUT_WS9] params_local[:5]: [{params[6]:.4f}, {params[7]:.4f}, {params[8]:.4f}, {params[9]:.4f}, {params[10]:.4f}]")
+
             # Compute full Jacobian (global + local)
             J = pdm.compute_jacobian(params)
 
             # DEBUG: Check mean_shift right before solve
-            if window_size == 11 and nonrigid_iter == 0 and self.debug_mode:
+            if window_size in (11, 9) and nonrigid_iter == 0 and self.debug_mode:
                 n_lm = len(mean_shift) // 2
                 ms_x = mean_shift[:n_lm]
                 ms_y = mean_shift[n_lm:]
@@ -664,6 +769,8 @@ class NURLMSOptimizer:
                 print(f"[DEBUG]   ms_x_sum = {ms_x_sum:.6f}, ms_y_sum = {ms_y_sum:.6f}")
                 print(f"[DEBUG]   ms_x abs_sum = {np.sum(np.abs(ms_x)):.4f}")
                 print(f"[DEBUG]   ms_x positive = {(ms_x > 0).sum()}, negative = {(ms_x < 0).sum()}, zero = {(ms_x == 0).sum()}")
+                # Print LM5 mean-shift
+                print(f"[DEBUG]   LM5 mean_shift: ({ms_x[5]:.4f}, {ms_y[5]:.4f})")
 
             # Solve for full parameter update with regularization
             delta_p = self._solve_update(J, mean_shift, W, Lambda_inv, params, nonrigid_iter, window_size)
@@ -828,11 +935,11 @@ class NURLMSOptimizer:
             tx = center_x - a1 * center_offset + b1 * center_offset
             ty = center_y - a1 * center_offset - b1 * center_offset
 
-            # Use float64 for transform matrix precision
+            # Use float32 to match C++ cv::Mat_<float>
             sim_matrix = np.array([
                 [a1, -b1, tx],
                 [b1,  a1, ty]
-            ], dtype=np.float64)
+            ], dtype=np.float32)
 
             # Warp using WARP_INVERSE_MAP
             area_of_interest = cv2.warpAffine(
@@ -872,6 +979,55 @@ class NURLMSOptimizer:
                 area_of_interest = image[y_start:y_end, x_start:x_end].copy()
 
         return area_of_interest
+
+    def _compute_peak_confidences(self, response_maps: dict, n_landmarks: int) -> np.ndarray:
+        """
+        Compute dynamic confidence weights based on response map peak sharpness.
+
+        Landmarks with weak/flat response peaks (ambiguous detection) get lower weights,
+        reducing their influence on parameter updates. This helps with low-contrast regions
+        where the "peak" is barely distinguishable from background noise.
+
+        The confidence is computed as:
+            peak_to_mean = response.max() / response.mean()
+            confidence = clamp((peak_to_mean - 1.0) / 4.0, 0, 1)
+
+        This maps:
+            - peak_to_mean = 1.0 (flat) -> confidence = 0.0
+            - peak_to_mean = 2.0 -> confidence = 0.25
+            - peak_to_mean = 5.0+ -> confidence = 1.0
+
+        Args:
+            response_maps: Dict mapping landmark_idx -> response_map array
+            n_landmarks: Total number of landmarks
+
+        Returns:
+            peak_confidences: Array of shape (n_landmarks,) with confidence values [0, 1]
+        """
+        peak_confidences = np.ones(n_landmarks)  # Default to 1.0 for missing landmarks
+
+        for landmark_idx, response_map in response_maps.items():
+            if landmark_idx >= n_landmarks:
+                continue
+
+            # Compute peak-to-mean ratio
+            resp_mean = response_map.mean()
+            resp_max = response_map.max()
+
+            if resp_mean > 1e-10:
+                peak_to_mean = resp_max / resp_mean
+            else:
+                peak_to_mean = 1.0  # Treat zero response as flat
+
+            # Map to confidence: (p2m - 1) / 4, clamped to [0, 1]
+            # p2m=1.0 -> 0.0, p2m=2.0 -> 0.25, p2m=5.0+ -> 1.0
+            confidence = min(1.0, max(0.0, (peak_to_mean - 1.0) / 4.0))
+            peak_confidences[landmark_idx] = confidence
+
+            if self.debug_mode and landmark_idx in self.tracked_landmarks:
+                print(f"[PEAK_CONF] LM{landmark_idx}: p2m={peak_to_mean:.3f} -> conf={confidence:.3f}")
+
+        return peak_confidences
 
     def _precompute_response_maps(self,
                                    landmarks_2d: np.ndarray,
@@ -1302,18 +1458,13 @@ class NURLMSOptimizer:
         resp_size = response_map.shape[0]
         step_size = 0.1
 
-        # Get or create precomputed KDE grid for this response size
-        cache_key = (resp_size, a)
-        if cache_key not in self.kde_cache:
-            self.kde_cache[cache_key] = self._precompute_kde_grid(resp_size, a)
-        kde_grid = self.kde_cache[cache_key]
-
         # DEBUG: Print for landmark 36
         if landmark_idx == 36 and not hasattr(self, '_printed_lm36_meanshift') and self.debug_mode:
             print(f"\n[PY][MEANSHIFT] Landmark 36 mean-shift computation:")
             print(f"[PY][MEANSHIFT]   dx (before clamp): {dx}")
             print(f"[PY][MEANSHIFT]   dy (before clamp): {dy}")
             print(f"[PY][MEANSHIFT]   resp_size: {resp_size}")
+            print(f"[PY][MEANSHIFT]   use_direct_kde: {self.use_direct_kde}")
 
         # Clamp dx, dy to valid range (C++ line 973-980)
         if dx < 0:
@@ -1325,41 +1476,53 @@ class NURLMSOptimizer:
         if dy > resp_size - step_size:
             dy = resp_size - step_size
 
-        # Round to nearest grid point (C++ line 983-984)
-        # C++ uses int cast which rounds down, +0.5 achieves rounding
-        closest_col = int(dy / step_size + 0.5)
-        closest_row = int(dx / step_size + 0.5)
+        if self.use_direct_kde:
+            # Direct KDE computation at actual (dx, dy) position
+            # This avoids grid snapping that causes systematic errors canceling to zero
+            ms_x, ms_y = _kde_mean_shift_direct(response_map, dx, dy, a)
+        else:
+            # Precomputed grid approach (original implementation)
+            # Get or create precomputed KDE grid for this response size
+            cache_key = (resp_size, a)
+            if cache_key not in self.kde_cache:
+                self.kde_cache[cache_key] = self._precompute_kde_grid(resp_size, a)
+            kde_grid = self.kde_cache[cache_key]
 
-        # Compute grid index (C++ line 986)
-        grid_size = int(resp_size / step_size + 0.5)
-        idx = closest_row * grid_size + closest_col
+            # Round to nearest grid point (C++ line 983-984)
+            # C++ uses int cast which rounds down, +0.5 achieves rounding
+            closest_col = int(dy / step_size + 0.5)
+            closest_row = int(dx / step_size + 0.5)
 
-        # DEBUG: Print after clamp
-        if landmark_idx == 36 and not hasattr(self, '_printed_lm36_meanshift') and self.debug_mode:
-            print(f"[PY][MEANSHIFT]   dx (after clamp): {dx}")
-            print(f"[PY][MEANSHIFT]   dy (after clamp): {dy}")
-            print(f"[PY][MEANSHIFT]   closest_row: {closest_row}, closest_col: {closest_col}")
-            print(f"[PY][MEANSHIFT]   kde_idx: {idx}")
-            print(f"[PY][MEANSHIFT]   Response map stats:")
-            print(f"[PY][MEANSHIFT]     shape: {response_map.shape}")
-            print(f"[PY][MEANSHIFT]     min: {response_map.min()}")
-            print(f"[PY][MEANSHIFT]     max: {response_map.max()}")
-            print(f"[PY][MEANSHIFT]     mean: {response_map.mean()}")
+            # Compute grid index (C++ line 986)
+            grid_size = int(resp_size / step_size + 0.5)
+            idx = closest_row * grid_size + closest_col
 
-        # Get precomputed KDE weights for this grid position
-        kde_weights = kde_grid[idx]
+            # DEBUG: Print after clamp
+            if landmark_idx == 36 and not hasattr(self, '_printed_lm36_meanshift') and self.debug_mode:
+                print(f"[PY][MEANSHIFT]   dx (after clamp): {dx}")
+                print(f"[PY][MEANSHIFT]   dy (after clamp): {dy}")
+                print(f"[PY][MEANSHIFT]   closest_row: {closest_row}, closest_col: {closest_col}")
+                print(f"[PY][MEANSHIFT]   kde_idx: {idx}")
+                print(f"[PY][MEANSHIFT]   Response map stats:")
+                print(f"[PY][MEANSHIFT]     shape: {response_map.shape}")
+                print(f"[PY][MEANSHIFT]     min: {response_map.min()}")
+                print(f"[PY][MEANSHIFT]     max: {response_map.max()}")
+                print(f"[PY][MEANSHIFT]     mean: {response_map.mean()}")
 
-        # DEBUG: Print center values for landmark 36
-        if landmark_idx == 36 and not hasattr(self, '_printed_lm36_meanshift') and self.debug_mode:
-            center_ii, center_jj = 5, 5  # Center of 11x11 map
-            print(f"[PY][MEANSHIFT]   Response at center (5,5): {response_map[center_ii, center_jj]:.8f}")
-            print(f"[PY][MEANSHIFT]   Response at peak (5,4): {response_map[5, 4]:.8f}")
-            # Save response map for detailed comparison
-            import numpy as np
-            np.save('/tmp/py_response_lm36.npy', response_map)
+            # Get precomputed KDE weights for this grid position
+            kde_weights = kde_grid[idx]
 
-        # Use Numba-optimized mean-shift computation
-        ms_x, ms_y = _kde_mean_shift_numba(response_map, dx, dy, a, kde_weights)
+            # DEBUG: Print center values for landmark 36
+            if landmark_idx == 36 and not hasattr(self, '_printed_lm36_meanshift') and self.debug_mode:
+                center_ii, center_jj = 5, 5  # Center of 11x11 map
+                print(f"[PY][MEANSHIFT]   Response at center (5,5): {response_map[center_ii, center_jj]:.8f}")
+                print(f"[PY][MEANSHIFT]   Response at peak (5,4): {response_map[5, 4]:.8f}")
+                # Save response map for detailed comparison
+                import numpy as np
+                np.save('/tmp/py_response_lm36.npy', response_map)
+
+            # Use Numba-optimized mean-shift computation with precomputed grid
+            ms_x, ms_y = _kde_mean_shift_numba(response_map, dx, dy, a, kde_weights)
 
         # DEBUG: Print final mean-shift for landmark 36
         if landmark_idx == 36 and not hasattr(self, '_printed_lm36_meanshift') and self.debug_mode:
@@ -1429,11 +1592,11 @@ class NURLMSOptimizer:
             tx = center_x - a1 * center_offset + b1 * center_offset
             ty = center_y - a1 * center_offset - b1 * center_offset
 
-            # Use float64 for transform matrix precision (matches C++ double)
+            # Use float32 to match C++ cv::Mat_<float>
             sim_matrix = np.array([
                 [a1, -b1, tx],
                 [b1,  a1, ty]
-            ], dtype=np.float64)
+            ], dtype=np.float32)
 
             # Warp using WARP_INVERSE_MAP (OpenFace line 245)
             # This inverts sim_matrix, effectively applying sim_img_to_ref
@@ -1729,15 +1892,15 @@ class NURLMSOptimizer:
         # Compute right-hand side: b = J^T·W·v
         b = J_rigid.T @ W @ v  # (6,)
 
-        # DEBUG: Print values matching C++ format
-        if self.debug_mode and iteration == 0 and window_size == 11:
-            print(f"\n[PY][ITER0_WS11_RIGID] Solving rigid update:")
-            print(f"[PY][ITER0_WS11_RIGID] J_w_t_m (J^T W v) (size {len(b)}):")
-            for i, val in enumerate(b):
-                print(f"[PY][ITER0_WS11_RIGID]   J_w_t_m[{i}]: {val:.8f}")
-            print(f"[PY][ITER0_WS11_RIGID] Hessian diagonal (first 6):")
-            for i in range(min(6, A.shape[0])):
-                print(f"[PY][ITER0_WS11_RIGID]   Hessian[{i},{i}]: {A[i,i]:.8f}")
+        # DEBUG: Print values matching C++ format (iteration 0 only to reduce noise)
+        if self.debug_mode and window_size == 11 and iteration == 0:
+            # Compute mean-shift sum (v is stacked as [x0..x67, y0..y67])
+            n = len(v) // 2
+            sum_ms_x = v[:n].sum()
+            sum_ms_y = v[n:].sum()
+            print(f"\n[PY][ITER0_WS11_RIGID] Mean-shift sum: ({sum_ms_x:.4f}, {sum_ms_y:.4f})")
+            print(f"[PY][ITER0_WS11_RIGID] Gradient J^T W v: scale={b[0]:.4f}, rot_x={b[1]:.4f}, rot_y={b[2]:.4f}")
+            print(f"[PY][ITER0_WS11_RIGID] Hessian diag: H[0,0]={A[0,0]:.4f}, H[1,1]={A[1,1]:.4f}, H[2,2]={A[2,2]:.4f}")
 
         # Solve linear system: A·Δp = b using Cholesky (matches C++ cv::DECOMP_CHOLESKY)
         try:
@@ -1755,11 +1918,9 @@ class NURLMSOptimizer:
         # The 0.75 damping previously here was incorrect - it's only used in CalcParams
         # during initial pose estimation, not in the main optimization loop
 
-        # DEBUG: Print delta_p matching C++ format
-        if self.debug_mode and iteration == 0 and window_size == 11:
-            print(f"[PY][ITER0_WS11_RIGID] param_update (size {len(delta_p_rigid)}):")
-            for i, val in enumerate(delta_p_rigid):
-                print(f"[PY][ITER0_WS11_RIGID]   param_update[{i}]: {val:.8f}")
+        # DEBUG: Print delta_p matching C++ format (iteration 0 only)
+        if self.debug_mode and window_size == 11 and iteration == 0:
+            print(f"[PY][ITER0_WS11_RIGID] delta_rot: ({delta_p_rigid[1]:.6f}, {delta_p_rigid[2]:.6f}, {delta_p_rigid[3]:.6f}) rad")
 
         return delta_p_rigid
 
@@ -1802,13 +1963,16 @@ class NURLMSOptimizer:
         b = JtWv - reg_term
 
         # DEBUG: Check mean-shift sums for translation
-        if window_size == 11 and iteration == 0 and self.debug_mode:
+        if window_size in (11, 9) and iteration == 0 and self.debug_mode:
             n_lm = len(v) // 2
             v_x_sum = np.sum(v[:n_lm])
             v_y_sum = np.sum(v[n_lm:])
             print(f"\n[DEBUG][SOLVE_UPDATE] WS{window_size} iter{iteration}:")
             print(f"[DEBUG]   v_x_sum = {v_x_sum:.4f}, v_y_sum = {v_y_sum:.4f}")
             print(f"[DEBUG]   JtWv[4] (tx) = {JtWv[4]:.4f}, JtWv[5] (ty) = {JtWv[5]:.4f}")
+            print(f"[DEBUG]   JtWv[:10] = {JtWv[:10]}")
+            print(f"[DEBUG]   reg_term[:10] = {reg_term[:10]}")
+            print(f"[DEBUG]   b[:10] = {b[:10]}")
 
         # Solve linear system: A·Δp = b using Cholesky decomposition
         # C++ OpenFace uses cv::DECOMP_CHOLESKY which is more numerically stable
