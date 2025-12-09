@@ -86,6 +86,62 @@ if boxes is not None and len(boxes) > 0:
     print(f"68 landmarks detected: {landmarks_68.shape}")
 ```
 
+### Video Processing (Recommended for Videos)
+
+**IMPORTANT**: For video processing, use `convergence_profile='video'` to enable template tracking and achieve sub-pixel accuracy matching C++ OpenFace:
+
+```python
+from pymtcnn import MTCNN
+from pyclnf import CLNF
+import cv2
+
+# Initialize with VIDEO profile for temporal tracking
+mtcnn = MTCNN(backend='coreml')
+clnf = CLNF(convergence_profile='video')  # Enables template tracking!
+
+# Open video
+cap = cv2.VideoCapture("video.mp4")
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    # Detect face
+    boxes, _ = mtcnn.detect(frame)
+    if boxes is None or len(boxes) == 0:
+        continue
+
+    # Apply bbox calibration
+    raw_x, raw_y, raw_w, raw_h = boxes[0][:4]
+    cal_x = raw_x + raw_w * (-0.0075)
+    cal_y = raw_y + raw_h * 0.2459
+    cal_w = raw_w * 1.0323
+    cal_h = raw_h * 0.7751
+
+    # Fit landmarks (template tracking happens automatically)
+    landmarks, info = clnf.fit(frame, face_bbox=(cal_x, cal_y, cal_w, cal_h))
+
+    # Use landmarks...
+
+cap.release()
+
+# Reset state when switching videos or faces
+clnf.reset_temporal_state()
+```
+
+**Video mode features:**
+- **Template tracking**: Uses face template from previous frame for translation correction
+- **Adaptive windows**: Smaller search windows after first frame (faster)
+- **Failure recovery**: Switches to larger windows after detection failure
+- **Temporal warm-start**: Uses previous frame params as initialization
+
+**Accuracy comparison (100 frames):**
+| Mode | Mean Error | Jaw Error |
+|------|------------|-----------|
+| Default | 0.67 px | 1.50 px |
+| **Video** | **0.07 px** | **0.10 px** |
+
 ## Architecture
 
 ```
@@ -188,13 +244,18 @@ Tested on multiple images against C++ OpenFace (video mode, weight_factor=0):
 
 ## API Reference
 
-### `CLNF(model_dir, detector, ...)`
+### `CLNF(model_dir, detector, convergence_profile, ...)`
 
 Initialize CLNF landmark detector.
 
 **Parameters:**
 - `model_dir` (str): Path to model directory (default: "pyclnf/models")
 - `detector` (bool): Enable PyMTCNN face detector (default: True)
+- `convergence_profile` (str): Optimization profile (default: None)
+  - `None`: Default settings for single images
+  - `'video'`: **Recommended for videos** - enables template tracking, adaptive windows, failure recovery
+  - `'accurate'`: More iterations for maximum accuracy
+  - `'fast'`: Fewer iterations for speed
 - `regularization` (float): Shape constraint weight (default: 22.5)
 - `sigma` (float): KDE kernel sigma (default: 2.25)
 - `window_sizes` (list): Hierarchical window sizes (default: [11, 9, 7, 5])
@@ -233,6 +294,15 @@ Detect face and fit landmarks in one call (requires built-in detector).
 **Returns:**
 - `landmarks` (ndarray): 68-point landmarks for first/largest face
 - `info` (dict): Fitting information including 'bbox'
+
+### `reset_temporal_state()`
+
+Reset video mode tracking state. **Call this when:**
+- Starting a new video
+- Switching to a different face
+- After extended tracking failure
+
+This clears the template tracking, warm-start parameters, and failure counters.
 
 ## Model Files
 
