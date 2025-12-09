@@ -128,10 +128,9 @@ class CLNF:
         self._face_template = None  # Stored face template from previous successful frame
         self._template_init_box = None  # Bounding box when template was extracted (x_min, y_min, w, h)
         self._template_face_offset = None  # Offset of face bbox within template (dx, dy)
-        self._template_scale = 0.5  # Scale factor for template (C++ default: face_template_scale/params_global[0])
+        self._template_scale = 0.5  # Scale factor for template (tuned for best accuracy)
         self._use_template_tracking = self._video_mode  # Enable by default in video mode
         self._tracking_initialized = False  # Whether tracking has been initialized
-        self._failures_in_a_row = 0  # Count of consecutive tracking failures
 
         # Adaptive window sizes for video mode (matches C++ OpenFace)
         # After first frame, use smaller search windows for faster tracking
@@ -446,8 +445,9 @@ class CLNF:
             self._prev_frame_params = optimized_params.copy()
             self._prev_frame_landmarks = landmarks.copy()
 
-        # Video mode: Update face template after successful optimization
-        # This template is used for template matching correction in subsequent frames
+        # Video mode: Always update template after fitting (like C++)
+        # C++ OpenFace always updates the template, regardless of "convergence"
+        # Convergence in CLNF is just an early-stop mechanism, not a quality metric
         if self._use_template_tracking:
             self._update_face_template(gray, optimized_params)
             if not self._tracking_initialized:
@@ -1137,7 +1137,6 @@ class CLNF:
         self._template_init_box = None
         self._template_face_offset = None
         self._tracking_initialized = False
-        self._failures_in_a_row = 0
         # Also reset optimizer's response map cache
         if hasattr(self.optimizer, 'cached_response_maps'):
             self.optimizer.cached_response_maps = None
