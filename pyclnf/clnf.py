@@ -304,20 +304,8 @@ class CLNF:
         else:
             gray = image
 
-        # Apply OpenFace MTCNN bbox correction if detector_type='pymtcnn'
-        # This is critical for accurate landmark detection with PyMTCNN bboxes
-        # (FaceDetectorMTCNN.cpp lines 1498-1504)
-        if detector_type == 'pymtcnn':
-            x, y, w, h = face_bbox
-            corrected_x = w * -0.0075 + x
-            corrected_y = h * 0.2459 + y
-            corrected_w = 1.0323 * w
-            corrected_h = 0.7751 * h
-            face_bbox = (corrected_x, corrected_y, corrected_w, corrected_h)
-            if self.debug_mode:
-                print(f"[BBOX] Applied MTCNN correction: ({x:.1f},{y:.1f},{w:.1f},{h:.1f}) -> ({corrected_x:.1f},{corrected_y:.1f},{corrected_w:.1f},{corrected_h:.1f})")
-
-        # For PDM init, no additional correction needed (bbox already corrected above)
+        # PyMTCNN now outputs calibrated bboxes directly (calibration in pymtcnn/base.py)
+        # No additional correction needed here
         effective_detector = None
 
         # Initialize parameters from bounding box (and optionally 5-point landmarks)
