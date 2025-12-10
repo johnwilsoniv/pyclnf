@@ -71,7 +71,10 @@ class CLNF:
                  shared_memory_dir: str = None,
                  convergence_profile: str = None,
                  early_window_exit: bool = False,
-                 early_exit_threshold: float = 0.3):
+                 early_exit_threshold: float = 0.3,
+                 use_validator: bool = None,
+                 validator_threshold: float = 0.725,
+                 reinit_video_every: int = 2):
         """
         Initialize CLNF model.
 
@@ -102,6 +105,10 @@ class CLNF:
                                If provided, overrides max_iterations and convergence_threshold
             early_window_exit: If True, skip remaining windows when already converged (default: True)
             early_exit_threshold: Mean shift threshold for early window exit (default: 0.3px)
+            use_validator: Enable CNN-based detection validation (default: True for video mode)
+                          When enabled in video mode, triggers re-detection if validation fails
+            validator_threshold: Confidence threshold for validator (default: 0.725, matching C++)
+            reinit_video_every: Number of consecutive validation failures before re-detection (default: 2)
         """
         self.use_shared_memory = use_shared_memory
         self.shared_memory_dir = shared_memory_dir
@@ -242,6 +249,23 @@ class CLNF:
             except Exception as e:
                 print(f"Warning: Could not initialize RetinaFace detector: {e}")
                 print("Detector will not be available. Use fit() with manual bbox instead.")
+
+        # Initialize detection validator (optional, default: True for video mode)
+        # Validator checks if tracking is still valid after each fit
+        # If validation fails consecutively, triggers re-detection
+        self.use_validator = use_validator if use_validator is not None else self._video_mode
+        self.validator_threshold = validator_threshold
+        self.reinit_video_every = reinit_video_every
+        self._validation_failures = 0  # Consecutive validation failures
+        self.validator = None
+        if self.use_validator:
+            try:
+                from .core.detection_validator import DetectionValidator
+                validator_path = self.model_dir / "detection_validation" / "validator_cnn_68.txt"
+                self.validator = DetectionValidator(str(validator_path))
+            except Exception as e:
+                print(f"Warning: Could not load detection validator: {e}")
+                self.use_validator = False
 
     def fit(self,
             image: np.ndarray,
@@ -506,6 +530,25 @@ class CLNF:
         # Include response maps for likelihood computation (used by multi-hypothesis)
         if hasattr(self.optimizer, 'cached_response_maps') and self.optimizer.cached_response_maps is not None:
             info['response_maps'] = self.optimizer.cached_response_maps
+
+        # Run detection validator if enabled
+        if self.validator is not None:
+            orientation = np.array([pose[0], pose[1], pose[2]])
+            validation_confidence = self.validator.check(orientation, gray, landmarks)
+            is_valid = validation_confidence > self.validator_threshold
+            info['validation_confidence'] = validation_confidence
+            info['validation_passed'] = is_valid
+
+            if is_valid:
+                self._validation_failures = 0
+            else:
+                self._validation_failures += 1
+                if self.debug_mode:
+                    print(f"[VALIDATOR] Failed ({self._validation_failures}/{self.reinit_video_every}): "
+                          f"confidence={validation_confidence:.4f} < {self.validator_threshold}")
+
+            info['validation_failures'] = self._validation_failures
+            info['needs_redetection'] = self._validation_failures >= self.reinit_video_every
 
         return landmarks, info
 
@@ -868,6 +911,9 @@ class CLNF:
         results = []
         frame_idx = 0
         prev_params = None  # For temporal consistency
+        redetect_count = 0
+        bbox = None
+        info = {}
 
         # Reset temporal state at start of video
         self.reset_temporal_state()
@@ -877,8 +923,17 @@ class CLNF:
             if not ret:
                 break
 
-            # Detect face
-            bbox = face_detector(frame)
+            # Detect face (or re-detect if validation triggered)
+            need_detection = (frame_idx == 0 or bbox is None or
+                             info.get('needs_redetection', False))
+
+            if need_detection:
+                bbox = face_detector(frame)
+                if info.get('needs_redetection', False):
+                    redetect_count += 1
+                    if self.debug_mode:
+                        print(f"[VIDEO] Re-detection triggered (total: {redetect_count})")
+                    self._validation_failures = 0  # Reset failure counter
 
             if bbox is not None:
                 # Use previous frame's parameters as initialization for temporal consistency
