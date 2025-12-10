@@ -261,9 +261,9 @@ class CLNF:
                            Shape (5, 2) with [left_eye, right_eye, nose, left_mouth, right_mouth].
                            If provided, estimates initial pose from these landmarks.
             return_params: If True, include optimized parameters in info dict
-            detector_type: Type of face detector (for documentation only, no correction applied).
-                           C++ OpenFace does NOT apply any bbox correction in PDM::CalcParams.
-                           Use 'mtcnn_raw' only if you need legacy MTCNN bbox adjustment.
+            detector_type: Type of face detector. If 'pymtcnn', applies OpenFace MTCNN
+                           bbox correction (FaceDetectorMTCNN.cpp lines 1498-1504).
+                           Pass None for pre-corrected bboxes or other detectors.
 
         Returns:
             landmarks: Detected 2D landmarks, shape (68, 2)
@@ -272,6 +272,7 @@ class CLNF:
                 - iterations: int
                 - final_update: float
                 - params: np.ndarray (if return_params=True)
+                - bbox: corrected bbox used for fitting
         """
         # Convert to grayscale if needed
         if len(image.shape) == 3:
@@ -279,10 +280,21 @@ class CLNF:
         else:
             gray = image
 
-        # Determine detector type for bbox preprocessing
-        # Default is None (no correction), matching C++ OpenFace behavior
-        # Only use 'mtcnn_raw' if you need the legacy MTCNN bbox correction
-        effective_detector = detector_type  # Pass through as-is, None means no correction
+        # Apply OpenFace MTCNN bbox correction if detector_type='pymtcnn'
+        # This is critical for accurate landmark detection with PyMTCNN bboxes
+        # (FaceDetectorMTCNN.cpp lines 1498-1504)
+        if detector_type == 'pymtcnn':
+            x, y, w, h = face_bbox
+            corrected_x = w * -0.0075 + x
+            corrected_y = h * 0.2459 + y
+            corrected_w = 1.0323 * w
+            corrected_h = 0.7751 * h
+            face_bbox = (corrected_x, corrected_y, corrected_w, corrected_h)
+            if self.debug_mode:
+                print(f"[BBOX] Applied MTCNN correction: ({x:.1f},{y:.1f},{w:.1f},{h:.1f}) -> ({corrected_x:.1f},{corrected_y:.1f},{corrected_w:.1f},{corrected_h:.1f})")
+
+        # For PDM init, no additional correction needed (bbox already corrected above)
+        effective_detector = None
 
         # Initialize parameters from bounding box (and optionally 5-point landmarks)
         if initial_params is None:
@@ -483,6 +495,7 @@ class CLNF:
             'final_update': opt_info['final_update'],
             'view': view_idx,
             'pose': pose,
+            'bbox': face_bbox,  # Corrected bbox used for fitting
             'iteration_history': all_iteration_history,  # Include full iteration history
             'eye_iteration_history': eye_iteration_history  # Include eye iteration history
         }
@@ -788,16 +801,9 @@ class CLNF:
                 # Get corresponding 5-point landmarks if available
                 lm5 = landmarks_5pt_all[i] if landmarks_5pt_all is not None else None
 
-                # Apply OpenFace MTCNN bbox correction (FaceDetectorMTCNN.cpp lines 1498-1504)
-                if self.detector_type == "pymtcnn":
-                    x, y, w, h = bbox
-                    corrected_x = w * -0.0075 + x
-                    corrected_y = h * 0.2459 + y
-                    corrected_w = 1.0323 * w
-                    corrected_h = 0.7751 * h
-                    bbox = (corrected_x, corrected_y, corrected_w, corrected_h)
-
-                landmarks, info = self.fit(image_gray, bbox, landmarks_5pt=lm5, return_params=return_params)
+                # Pass detector_type to fit() so it applies bbox correction
+                landmarks, info = self.fit(image_gray, bbox, landmarks_5pt=lm5,
+                                          return_params=return_params, detector_type=self.detector_type)
                 info['bbox'] = bbox  # Add bbox to info (corrected bbox)
                 results.append((landmarks, info))
             return results
@@ -817,24 +823,16 @@ class CLNF:
         # Get 5-point landmarks for the selected face
         landmarks_5pt = landmarks_5pt_all[largest_idx] if landmarks_5pt_all is not None else None
 
-        # Apply OpenFace MTCNN bbox correction (FaceDetectorMTCNN.cpp lines 1498-1504)
-        # This corrects the bbox to be tight around facial landmarks as expected by CLNF
-        if self.detector_type == "pymtcnn":
-            x, y, w, h = bbox
-            corrected_x = w * -0.0075 + x
-            corrected_y = h * 0.2459 + y
-            corrected_w = 1.0323 * w
-            corrected_h = 0.7751 * h
-            bbox = (corrected_x, corrected_y, corrected_w, corrected_h)
-
         # NOTE: Multi-hypothesis fitting disabled for our use case.
         # C++ OpenFace tests 11 rotation hypotheses and selects by likelihood, but the
         # likelihood-based selection occasionally picks suboptimal hypotheses when scores
         # are very close (e.g., 0.2249 vs 0.2166), causing ~1px additional error.
         # Using frontal hypothesis (0) directly gives more consistent results.
         # To re-enable: landmarks, info = self.fit_multi_hypothesis(image_gray, bbox, return_params=return_params)
-        landmarks, info = self.fit(image_gray, face_bbox=bbox, return_params=return_params)
-        info['bbox'] = bbox  # Add bbox to info (corrected bbox)
+        # Pass detector_type to fit() so it applies bbox correction
+        landmarks, info = self.fit(image_gray, face_bbox=bbox, return_params=return_params,
+                                   detector_type=self.detector_type)
+        info['bbox'] = info.get('bbox', bbox)  # Use corrected bbox from fit() if available
         return landmarks, info
 
     def fit_video(self,
