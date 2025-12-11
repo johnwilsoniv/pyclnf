@@ -1899,8 +1899,20 @@ class NURLMSOptimizer:
             sum_ms_x = v[:n].sum()
             sum_ms_y = v[n:].sum()
             print(f"\n[PY][ITER0_WS11_RIGID] Mean-shift sum: ({sum_ms_x:.4f}, {sum_ms_y:.4f})")
-            print(f"[PY][ITER0_WS11_RIGID] Gradient J^T W v: scale={b[0]:.4f}, rot_x={b[1]:.4f}, rot_y={b[2]:.4f}")
-            print(f"[PY][ITER0_WS11_RIGID] Hessian diag: H[0,0]={A[0,0]:.4f}, H[1,1]={A[1,1]:.4f}, H[2,2]={A[2,2]:.4f}")
+            print(f"[PY][ITER0_WS11_RIGID] J_w_t_m (gradient) [all 6]:")
+            print(f"  [0] scale:  {b[0]:.2f}")
+            print(f"  [1] rot_x:  {b[1]:.2f}")
+            print(f"  [2] rot_y:  {b[2]:.2f}")
+            print(f"  [3] rot_z:  {b[3]:.2f}")
+            print(f"  [4] tx:     {b[4]:.2f}")
+            print(f"  [5] ty:     {b[5]:.2f}")
+            print(f"[PY][ITER0_WS11_RIGID] Hessian diagonal:")
+            print(f"  [0,0] scale: {A[0,0]:.2f}")
+            print(f"  [1,1] rot_x: {A[1,1]:.2f}")
+            print(f"  [2,2] rot_y: {A[2,2]:.2f}")
+            print(f"  [3,3] rot_z: {A[3,3]:.2f}")
+            print(f"  [4,4] tx:    {A[4,4]:.2f}")
+            print(f"  [5,5] ty:    {A[5,5]:.2f}")
 
         # Solve linear system: A·Δp = b using Cholesky (matches C++ cv::DECOMP_CHOLESKY)
         try:
@@ -1920,7 +1932,13 @@ class NURLMSOptimizer:
 
         # DEBUG: Print delta_p matching C++ format (iteration 0 only)
         if self.debug_mode and window_size == 11 and iteration == 0:
-            print(f"[PY][ITER0_WS11_RIGID] delta_rot: ({delta_p_rigid[1]:.6f}, {delta_p_rigid[2]:.6f}, {delta_p_rigid[3]:.6f}) rad")
+            print(f"[PY][ITER0_WS11_RIGID] param_update:")
+            print(f"  [0] delta_scale: {delta_p_rigid[0]:.6f}")
+            print(f"  [1] delta_rot_x: {delta_p_rigid[1]:.6f} rad = {delta_p_rigid[1]*57.3:.2f} deg")
+            print(f"  [2] delta_rot_y: {delta_p_rigid[2]:.6f} rad = {delta_p_rigid[2]*57.3:.2f} deg")
+            print(f"  [3] delta_rot_z: {delta_p_rigid[3]:.6f} rad")
+            print(f"  [4] delta_tx:    {delta_p_rigid[4]:.6f}")
+            print(f"  [5] delta_ty:    {delta_p_rigid[5]:.6f}")
 
         return delta_p_rigid
 
