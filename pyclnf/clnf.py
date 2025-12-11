@@ -136,16 +136,24 @@ class CLNF:
         self._face_template = None  # Stored face template from previous successful frame
         self._template_init_box = None  # Bounding box when template was extracted (x_min, y_min, w, h)
         self._template_face_offset = None  # Offset of face bbox within template (dx, dy)
-        self._template_scale = 0.5  # Scale factor for template (tuned for best accuracy)
+        self._template_scale = 0.3  # Scale factor for template (matches C++ face_template_scale)
         self._use_template_tracking = self._video_mode  # Enable by default in video mode
         self._tracking_initialized = False  # Whether tracking has been initialized
+
+        # C++ video tracking failure state (mirrors LandmarkDetectorFunc.cpp:215-289)
+        # failures_in_a_row: -1 = initial state, reset to -1 on success, increment on failure
+        # detection_success: tracks if previous frame's fitting was successful
+        self._failures_in_a_row = -1  # C++ uses -1 as initial state
+        self._detection_success = False  # Set True when validator passes
 
         # Adaptive window sizes for video mode (matches C++ OpenFace)
         # After first frame, use smaller search windows for faster tracking
         # C++ window_sizes_small = [0, 9, 7, 0] - 0 means skip that scale
         # C++ window_sizes_init = [11, 9, 7, 5] - includes all scales for first detection
         self._window_sizes_init = [11, 9, 7, 5]  # First detection - all scales
-        self._window_sizes_tracking = [9, 7]  # Subsequent tracking (skip coarsest/finest scales)
+        # C++ uses window_sizes_small = [0, 9, 7, 0] - middle scales only
+        # Skip coarsest (11) and finest (5) for faster tracking
+        self._window_sizes_tracking = [9, 7]  # Track with middle window sizes only
 
         # Match C++ OpenFace window sizes including WS5
         # WS5 uses scale 1.0 which requires scale clamping (fixed in optimizer.py)
@@ -311,16 +319,15 @@ class CLNF:
         # Initialize parameters from bounding box (and optionally 5-point landmarks)
         if initial_params is None:
             # Phase 2: Video mode temporal warm-start
-            # Use previous frame's params as starting point for faster convergence
+            # C++ tracking (LandmarkDetectorFunc.cpp:230-249) uses previous params DIRECTLY
+            # without reinitializing from bbox. Only template matching applies a SHIFT.
             if self._video_mode and self._prev_frame_params is not None:
                 params = self._prev_frame_params.copy()
-                # Update translation to account for face movement based on new bbox
-                # This provides a better starting point than raw previous params
-                new_bbox_init = self.pdm.init_params(face_bbox, detector_type=effective_detector)
-                params[4] = new_bbox_init[4]  # tx
-                params[5] = new_bbox_init[5]  # ty
+                # NOTE: C++ does NOT override tx, ty from bbox in tracking mode.
+                # It uses previous params directly and only applies template shift later.
+                # This is critical for accuracy - bbox-derived tx/ty introduces drift.
                 if self.debug_mode:
-                    print(f"[VIDEO_MODE] Using warm-start from previous frame")
+                    print(f"[VIDEO_MODE] Using previous params directly (C++ style)")
             elif landmarks_5pt is not None and landmarks_5pt.shape == (5, 2):
                 # Use 5-point landmarks for initial pose estimation (like C++ OpenFace)
                 # Note: init_params_from_5pt uses landmarks directly, no bbox correction needed
@@ -529,14 +536,24 @@ class CLNF:
 
             if is_valid:
                 self._validation_failures = 0
+                # C++ tracking state: success resets failures_in_a_row to -1
+                self._detection_success = True
+                self._failures_in_a_row = -1
             else:
                 self._validation_failures += 1
+                # C++ tracking state: failure increments failures_in_a_row
+                self._detection_success = False
+                self._failures_in_a_row += 1
                 if self.debug_mode:
                     print(f"[VALIDATOR] Failed ({self._validation_failures}/{self.reinit_video_every}): "
                           f"confidence={validation_confidence:.4f} < {self.validator_threshold}")
 
             info['validation_failures'] = self._validation_failures
             info['needs_redetection'] = self._validation_failures >= self.reinit_video_every
+        else:
+            # No validator = assume success (C++ behavior)
+            self._detection_success = True
+            self._failures_in_a_row = -1
 
         return landmarks, info
 
@@ -791,18 +808,24 @@ class CLNF:
                 "2. Use fit() method with manual bbox instead"
             )
 
-        # IMPORTANT: MTCNN detection must use original color image for consistency with C++
+        # IMPORTANT: MTCNN detection REQUIRES original color image for accuracy.
         # Converting grayscale->BGR produces DIFFERENT detections than original color!
-        # This was causing ~1.7px jaw landmark errors.
+        # This causes ~4px jaw landmark errors (grayscale->BGR bbox differs by ~5-16px).
         if len(image.shape) == 2:
-            # Grayscale input - convert to BGR for detector
-            # WARNING: This may produce different detections than using original color image
-            image_bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-            image_gray = image
-        else:
-            # Color input (preferred) - use as-is for detector, convert to gray for fitting
-            image_bgr = image
-            image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            raise ValueError(
+                "detect_and_fit() requires a color (BGR) image for accurate face detection.\n"
+                "MTCNN produces different bounding boxes for grayscale vs color images,\n"
+                "which causes ~4px jaw landmark error.\n\n"
+                "Solutions:\n"
+                "1. Pass the original color image: clnf.detect_and_fit(frame_bgr)\n"
+                "2. For grayscale-only workflows, use fit() with external bbox:\n"
+                "   bbox = your_face_detector(image)\n"
+                "   landmarks, info = clnf.fit(gray_image, bbox)"
+            )
+
+        # Color input - use as-is for detector, convert to gray for fitting
+        image_bgr = image
+        image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
         # Detect faces - handle different detector APIs
         landmarks_5pt_all = None  # Will store 5-point landmarks if available
@@ -912,15 +935,35 @@ class CLNF:
                 break
 
             # Detect face (or re-detect if validation triggered)
+            # C++ re-detection logic (LandmarkDetectorFunc.cpp:291-302)
+            reinit_every = self.reinit_video_every  # Default: 4
+
+            # Condition 1: Not initialized, periodic attempt (every reinit*6 failures)
+            condition1 = (not self._tracking_initialized and
+                         self._failures_in_a_row >= 0 and
+                         (self._failures_in_a_row + 1) % (reinit_every * 6) == 0)
+
+            # Condition 2: Initialized but failed, periodic re-init
+            condition2 = (self._tracking_initialized and
+                         not self._detection_success and
+                         reinit_every > 0 and
+                         self._failures_in_a_row > 0 and
+                         self._failures_in_a_row % reinit_every == 0)
+
             need_detection = (frame_idx == 0 or bbox is None or
-                             info.get('needs_redetection', False))
+                             info.get('needs_redetection', False) or
+                             condition1 or condition2)
 
             if need_detection:
                 bbox = face_detector(frame)
-                if info.get('needs_redetection', False):
+                if frame_idx > 0:  # Re-detection (not first frame)
                     redetect_count += 1
                     if self.debug_mode:
-                        print(f"[VIDEO] Re-detection triggered (total: {redetect_count})")
+                        reason = "validator" if info.get('needs_redetection', False) else \
+                                 "condition1 (uninit periodic)" if condition1 else \
+                                 "condition2 (failed periodic)" if condition2 else "bbox lost"
+                        print(f"[VIDEO] Frame {frame_idx}: Re-detection triggered ({reason}), "
+                              f"failures={self._failures_in_a_row}, total redetects={redetect_count}")
                     self._validation_failures = 0  # Reset failure counter
 
             if bbox is not None:
@@ -1113,7 +1156,9 @@ class CLNF:
             template_found_y = max_loc[1] / scaling + roi_y
 
             # The face bbox is offset within the template by _template_face_offset
-            # So actual face position = template position + face offset (unscaled)
+            # When template was scaled, the offset in IMAGE coordinates stays the same
+            # (the offset was stored in original image coords, not template coords)
+            # So actual face position = template position + face offset (in image coords)
             face_found_x = template_found_x + self._template_face_offset[0]
             face_found_y = template_found_y + self._template_face_offset[1]
 
@@ -1162,20 +1207,20 @@ class CLNF:
         # Store the init_box for next frame's template matching
         self._template_init_box = (x_min, y_min, width, height)
 
-        # Extract face region with some padding (like C++ UpdateTemplate)
-        padding = 0.1
-        x1 = int(max(0, x_min - width * padding))
-        y1 = int(max(0, y_min - height * padding))
-        x2 = int(min(gray.shape[1], x_max + width * padding))
-        y2 = int(min(gray.shape[0], y_max + height * padding))
+        # Extract face region directly without padding (matching C++ UpdateTemplate)
+        # C++ extracts just the face bbox region, no additional padding
+        x1 = int(max(0, x_min))
+        y1 = int(max(0, y_min))
+        x2 = int(min(gray.shape[1], x_max))
+        y2 = int(min(gray.shape[0], y_max))
 
         if x2 > x1 and y2 > y1:
             self._face_template = gray[y1:y2, x1:x2].copy()
             self._template_scale = params[0]  # Store current scale
 
-            # Store the offset of face bbox within the template region
-            # This is needed to correctly compute shift when template matching
-            self._template_face_offset = (x_min - x1, y_min - y1)
+            # No offset needed since template IS the face bbox (like C++)
+            # Face bbox position = template position
+            self._template_face_offset = (0.0, 0.0)
 
             if self.debug_mode:
                 print(f"[TEMPLATE_UPDATE] Template size: {self._face_template.shape}")
