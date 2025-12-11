@@ -435,6 +435,14 @@ class PDM:
                 bbox = self._apply_mtcnn_bbox_preprocessing(bbox)
             x, y, width, height = bbox
 
+            # Validate bbox format - must be (x, y, width, height) with positive dimensions
+            if width <= 0 or height <= 0:
+                raise ValueError(
+                    f"Invalid bbox format: width={width:.1f}, height={height:.1f}. "
+                    f"Expected (x, y, width, height) with positive width/height. "
+                    f"Got bbox={bbox}. If you have (x1, y1, x2, y2) format, convert first."
+                )
+
             # OpenFace-style initialization (aspect-ratio aware)
             # Based on OpenFace PDM.cpp:193-231
             # This computes scale from model dimensions, accounting for both width and height.
