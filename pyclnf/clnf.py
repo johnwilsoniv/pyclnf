@@ -661,6 +661,13 @@ class CLNF:
         if return_params:
             best_info['params'] = best_params
 
+        # FIX: Update tracking state with BEST hypothesis params, not last tested
+        # Each fit() call in the loop above updates _prev_frame_params, leaving it
+        # with hypothesis 10's params. We need to override with the winning hypothesis.
+        if self._video_mode:
+            self._prev_frame_params = best_params.copy()
+            self._prev_frame_landmarks = best_landmarks.copy()
+
         return best_landmarks, best_info
 
     def _compute_model_likelihood(self, gray: np.ndarray, landmarks: np.ndarray,
@@ -880,8 +887,17 @@ class CLNF:
         # Get 5-point landmarks for the selected face
         landmarks_5pt = landmarks_5pt_all[largest_idx] if landmarks_5pt_all is not None else None
 
-        # Multi-hypothesis fitting: test 11 rotation hypotheses like C++ OpenFace
-        landmarks, info = self.fit_multi_hypothesis(image_gray, bbox, return_params=return_params)
+        # C++ OpenFace behavior:
+        # - First frame (or after tracking failure): multi-hypothesis fitting
+        # - Subsequent frames with tracking: single hypothesis using previous params
+        if self._tracking_initialized and self._video_mode:
+            # Tracking mode: use previous params, skip multi-hypothesis
+            landmarks, info = self.fit(image_gray, bbox, landmarks_5pt=landmarks_5pt,
+                                       return_params=return_params, detector_type=self.detector_type)
+        else:
+            # First frame or tracking lost: multi-hypothesis fitting
+            landmarks, info = self.fit_multi_hypothesis(image_gray, bbox, return_params=return_params)
+
         info['bbox'] = info.get('bbox', bbox)  # Use corrected bbox from fit() if available
         return landmarks, info
 
