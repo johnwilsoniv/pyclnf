@@ -73,8 +73,8 @@ CONVERGENCE_PROFILES: Dict[str, Dict[str, Any]] = {
     },
     'video': {
         'convergence_threshold': 0.005,  # Gold standard (matches C++ accuracy)
-        'rigid_iterations': 10,  # More rigid iterations for jaw accuracy (Dec 8th fix)
-        'nonrigid_iterations': 5,  # Fewer nonrigid to avoid divergence
+        'rigid_iterations': 5,  # C++ uses num_optimisation_iteration=5
+        'nonrigid_iterations': 5,  # Same for both phases in C++
         'min_iterations': 1,  # Can converge faster with warm-start
         'description': 'Optimized for video with temporal warm-start'
     },
@@ -594,12 +594,13 @@ class NURLMSOptimizer:
 
             # Early stopping: check if landmarks have converged
             # Only check after min_iterations to ensure we've made progress
-            # GOLD STANDARD: Use total norm with fixed 0.01 threshold (matches C++ OpenFace)
+            # C++ OpenFace uses MAX per-landmark displacement, not total norm
             if (rigid_iter >= self.min_iterations and
                 previous_landmarks is not None and
                 self.convergence_threshold > 0):
-                # Total shape change norm (not per-landmark mean)
-                shape_change = np.linalg.norm(current_landmarks - previous_landmarks)
+                # Max per-landmark displacement (matches C++ OpenFace behavior)
+                per_landmark_change = np.linalg.norm(current_landmarks - previous_landmarks, axis=1)
+                shape_change = np.max(per_landmark_change)
                 if self.debug_mode and window_size == 11:
                     print(f"[DEBUG] RIGID iter {rigid_iter}: shape_change = {shape_change:.6f} (threshold: 0.01)")
                 if shape_change < 0.01:  # Fixed threshold matching C++ line 1173
@@ -719,12 +720,13 @@ class NURLMSOptimizer:
 
             # Early stopping: check if landmarks have converged
             # Only check after min_iterations to ensure we've made progress
-            # GOLD STANDARD: Use total norm with fixed 0.01 threshold (matches C++ OpenFace)
+            # C++ OpenFace uses MAX per-landmark displacement, not total norm
             if (nonrigid_iter >= self.min_iterations and
                 previous_landmarks is not None and
                 self.convergence_threshold > 0):
-                # Total shape change norm (not per-landmark mean)
-                shape_change = np.linalg.norm(current_landmarks - previous_landmarks)
+                # Max per-landmark displacement (matches C++ OpenFace behavior)
+                per_landmark_change = np.linalg.norm(current_landmarks - previous_landmarks, axis=1)
+                shape_change = np.max(per_landmark_change)
                 if shape_change < 0.01:  # Fixed threshold matching C++ line 1173
                     nonrigid_converged = True
                     break
