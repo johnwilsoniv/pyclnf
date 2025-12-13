@@ -399,13 +399,12 @@ class CLNF:
             # Get patch experts for this view and scale
             patch_experts = self._get_patch_experts(view_idx, patch_scale)
 
-            # Extract patch confidence weights (OpenFace NU-RLMS: Non-Uniform weighting)
-            # For landmarks with patch experts, use their confidence values
-            # For landmarks without patch experts, use default weight=1.0
-            weights = np.ones(self.pdm.n_points)  # Default: uniform weights
-            for landmark_idx, patch_expert in patch_experts.items():
-                if hasattr(patch_expert, 'patch_confidence'):
-                    weights[landmark_idx] = patch_expert.patch_confidence
+            # WEIGHTS: Use uniform weights (1.0) for all landmarks to match C++ OpenFace
+            # C++ OpenFace uses weight=1.0 for all landmarks in NU-RLMS optimization.
+            # The patch_confidence values stored in CEN experts are NOT used as weights
+            # in C++; they serve a different purpose (reliability estimation).
+            # The Hessian diagonal for tx,ty should be exactly 68.0 (sum of weights).
+            weights = np.ones(self.pdm.n_points)
 
             # NOTE: Regularization and sigma are adapted by the optimizer internally
             # based on patch_scaling (see optimizer._compute_scale_adapted_params)
@@ -622,6 +621,10 @@ class CLNF:
         best_hypothesis_idx = 0
 
         for idx, rotation in enumerate(rotation_hypotheses):
+            # Clear response map cache to ensure fresh computation for each hypothesis
+            self.optimizer.cached_response_maps = None
+            self.optimizer.cached_landmarks = None
+
             # Initialize params with this rotation hypothesis
             initial_params = self.pdm.init_params_with_rotation(
                 face_bbox, rotation, detector_type=effective_detector
@@ -877,15 +880,8 @@ class CLNF:
         # Get 5-point landmarks for the selected face
         landmarks_5pt = landmarks_5pt_all[largest_idx] if landmarks_5pt_all is not None else None
 
-        # NOTE: Multi-hypothesis fitting disabled for our use case.
-        # C++ OpenFace tests 11 rotation hypotheses and selects by likelihood, but the
-        # likelihood-based selection occasionally picks suboptimal hypotheses when scores
-        # are very close (e.g., 0.2249 vs 0.2166), causing ~1px additional error.
-        # Using frontal hypothesis (0) directly gives more consistent results.
-        # To re-enable: landmarks, info = self.fit_multi_hypothesis(image_gray, bbox, return_params=return_params)
-        # Pass detector_type to fit() so it applies bbox correction
-        landmarks, info = self.fit(image_gray, face_bbox=bbox, return_params=return_params,
-                                   detector_type=self.detector_type)
+        # Multi-hypothesis fitting: test 11 rotation hypotheses like C++ OpenFace
+        landmarks, info = self.fit_multi_hypothesis(image_gray, bbox, return_params=return_params)
         info['bbox'] = info.get('bbox', bbox)  # Use corrected bbox from fit() if available
         return landmarks, info
 
