@@ -307,12 +307,12 @@ class PDM:
         c3 = np.cos(euler[2])  # cos(roll)
 
         # Rotation matrix from XYZ Euler angles (OpenFace convention)
-        # Use float32 to match C++ OpenFace (cv::Mat_<float>)
+        # Use float64 for numerical precision to prevent error accumulation across frames
         R = np.array([
             [c2 * c3,              -c2 * s3,             s2],
             [c1 * s3 + c3 * s1 * s2,  c1 * c3 - s1 * s2 * s3,  -c2 * s1],
             [s1 * s3 - c1 * c3 * s2,  c3 * s1 + c1 * s2 * s3,   c1 * c2]
-        ], dtype=np.float32)
+        ], dtype=np.float64)
 
         return R
 
@@ -1108,7 +1108,7 @@ class PDM:
         #         [wz,    1,    -wx  ]
         #         [-wy,   wx,    1   ]
         #    This matches OpenFace lines 470-474
-        R2 = np.eye(3, dtype=np.float32)
+        R2 = np.eye(3, dtype=np.float64)
         R2[0, 1] = -delta_p[3]  # -wz
         R2[1, 0] = delta_p[3]   # wz
         R2[0, 2] = delta_p[2]   # wy
@@ -1189,18 +1189,18 @@ class PDM:
 
         if theta < 1e-10:
             # Near-identity rotation
-            return np.zeros(3, dtype=np.float32)
+            return np.zeros(3, dtype=np.float64)
 
         # Compute rotation axis
         axis = np.array([
             R[2, 1] - R[1, 2],
             R[0, 2] - R[2, 0],
             R[1, 0] - R[0, 1]
-        ], dtype=np.float32)
+        ], dtype=np.float64)
 
         axis_norm = np.linalg.norm(axis)
         if axis_norm < 1e-10:
-            return np.zeros(3, dtype=np.float32)
+            return np.zeros(3, dtype=np.float64)
 
         axis = axis / axis_norm
         return theta * axis
@@ -1219,7 +1219,7 @@ class PDM:
         """
         theta = np.linalg.norm(axis_angle)
         if theta < 1e-10:
-            return np.zeros(3, dtype=np.float32)
+            return np.zeros(3, dtype=np.float64)
 
         # Convert axis-angle to rotation matrix
         axis = axis_angle / theta
@@ -1227,9 +1227,9 @@ class PDM:
             [0, -axis[2], axis[1]],
             [axis[2], 0, -axis[0]],
             [-axis[1], axis[0], 0]
-        ], dtype=np.float32)
+        ], dtype=np.float64)
 
-        R = np.eye(3, dtype=np.float32) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K)
+        R = np.eye(3, dtype=np.float64) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K)
 
         # Extract Euler angles from rotation matrix using quaternion intermediate
         # This matches OpenFace's RotationMatrix2Euler (RotationHelpers.h lines 73-89)
@@ -1253,7 +1253,7 @@ class PDM:
         pitch = np.arctan2(2.0 * (q0 * q1 - q2 * q3), q0*q0 - q1*q1 - q2*q2 + q3*q3)
         roll = np.arctan2(2.0 * (q0 * q3 - q1 * q2), q0*q0 + q1*q1 - q2*q2 - q3*q3)
 
-        return np.array([pitch, yaw, roll], dtype=np.float32)
+        return np.array([pitch, yaw, roll], dtype=np.float64)
 
     def fit_to_landmarks_2d(self, landmarks_2d: np.ndarray, current_params: np.ndarray,
                              reg_factor: float = 1.0, max_iter: int = 1000,
