@@ -57,7 +57,7 @@ class CLNF:
                  regularization: float = 22.5,  # C++ CECLM: 25.0 base × 0.9 = 22.5
                  max_iterations: int = 10,  # Per phase distributed across windows (~40 total to match C++)
                  convergence_threshold: float = 0.005,  # Gold standard: strict convergence for accuracy
-                 sigma: float = 2.25,  # KDE kernel sigma - matches C++ CECLM (1.5 * 1.5)
+                 sigma: float = 2.5,  # KDE kernel sigma - verified from C++ debug dump
                  weight_multiplier: float = 0.0,  # Disabled - hurts face model (tested: 2.0, 5.0 both worse)
                  window_sizes: list = None,
                  detector: str = "pymtcnn",
@@ -88,7 +88,7 @@ class CLNF:
             convergence_threshold: Mean per-landmark convergence threshold in pixels
                           (default: 0.005 pixels for gold standard accuracy)
             sigma: Gaussian kernel sigma for KDE mean-shift
-                  (OpenFace CEN/CECLM uses σ=2.25 = 1.5 base × 1.5 CECLM multiplier)
+                  (C++ OpenFace uses σ=2.5 - verified from debug dump)
             weight_multiplier: Weight multiplier w for patch confidences
                              (OpenFace uses w=7 for Multi-PIE, w=5 for in-the-wild)
             window_sizes: List of window sizes for hierarchical refinement (default: [11, 9, 7])
@@ -137,7 +137,7 @@ class CLNF:
         self._template_init_box = None  # Bounding box when template was extracted (x_min, y_min, w, h)
         self._template_face_offset = None  # Offset of face bbox within template (dx, dy)
         self._template_scale = 0.3  # Scale factor for template (matches C++ face_template_scale)
-        self._use_template_tracking = self._video_mode  # Enable by default in video mode
+        self._use_template_tracking = False  # Disabled by default (matches C++ use_face_template=false)
         self._tracking_initialized = False  # Whether tracking has been initialized
 
         # C++ video tracking failure state (mirrors LandmarkDetectorFunc.cpp:215-289)
@@ -620,7 +620,26 @@ class CLNF:
         best_likelihood = -np.inf
         best_hypothesis_idx = 0
 
+        # Save tracking state BEFORE hypothesis testing
+        # Each fit() call updates tracking state, which corrupts subsequent hypotheses
+        saved_tracking_initialized = self._tracking_initialized
+        saved_face_template = self._face_template.copy() if self._face_template is not None else None
+        saved_template_init_box = self._template_init_box
+        saved_template_face_offset = self._template_face_offset
+        saved_template_scale = self._template_scale
+        saved_prev_frame_params = self._prev_frame_params.copy() if self._prev_frame_params is not None else None
+        saved_prev_frame_landmarks = self._prev_frame_landmarks.copy() if self._prev_frame_landmarks is not None else None
+
         for idx, rotation in enumerate(rotation_hypotheses):
+            # Restore tracking state before each hypothesis
+            # This ensures each hypothesis starts from the same state
+            self._tracking_initialized = saved_tracking_initialized
+            self._face_template = saved_face_template.copy() if saved_face_template is not None else None
+            self._template_init_box = saved_template_init_box
+            self._template_face_offset = saved_template_face_offset
+            self._template_scale = saved_template_scale
+            self._prev_frame_params = saved_prev_frame_params.copy() if saved_prev_frame_params is not None else None
+            self._prev_frame_landmarks = saved_prev_frame_landmarks.copy() if saved_prev_frame_landmarks is not None else None
             # Clear response map cache to ensure fresh computation for each hypothesis
             self.optimizer.cached_response_maps = None
             self.optimizer.cached_landmarks = None
@@ -661,12 +680,15 @@ class CLNF:
         if return_params:
             best_info['params'] = best_params
 
-        # FIX: Update tracking state with BEST hypothesis params, not last tested
-        # Each fit() call in the loop above updates _prev_frame_params, leaving it
-        # with hypothesis 10's params. We need to override with the winning hypothesis.
+        # FIX: Update tracking state with BEST hypothesis results
+        # We saved/restored state during hypothesis testing, now set final state
         if self._video_mode:
             self._prev_frame_params = best_params.copy()
             self._prev_frame_landmarks = best_landmarks.copy()
+            self._tracking_initialized = True
+            # Update template from best hypothesis
+            if self._use_template_tracking:
+                self._update_face_template(gray, best_params)
 
         return best_landmarks, best_info
 
@@ -817,6 +839,35 @@ class CLNF:
                 "1. Initialize CLNF with detector='retinaface' (default)\n"
                 "2. Use fit() method with manual bbox instead"
             )
+
+        # TRACKING MODE: Skip re-detection, derive bbox from previous landmarks
+        # C++ OpenFace doesn't re-run face detector during tracking - it uses
+        # previous landmarks directly. Re-detecting causes bbox variance that
+        # propagates to landmark error (especially on larger faces).
+        if self._tracking_initialized and self._video_mode and self._prev_frame_landmarks is not None:
+            # Derive bbox from previous landmarks with margin
+            prev_lm = self._prev_frame_landmarks
+            x_min, y_min = prev_lm.min(axis=0)
+            x_max, y_max = prev_lm.max(axis=0)
+            w, h = x_max - x_min, y_max - y_min
+            margin = 0.3  # 30% margin around face
+            bbox = (x_min - w * margin, y_min - h * margin,
+                    w * (1 + 2 * margin), h * (1 + 2 * margin))
+
+            # Convert to grayscale for fitting
+            if len(image.shape) == 3:
+                image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            else:
+                image_gray = image
+
+            # Tracking mode: use fit() which uses prev_frame_params and template matching
+            landmarks, info = self.fit(image_gray, bbox, return_params=return_params,
+                                       detector_type=self.detector_type)
+            info['bbox'] = bbox
+            info['tracking_mode'] = True
+            return landmarks, info
+
+        # FIRST FRAME / RE-DETECTION MODE: Run face detector
 
         # IMPORTANT: MTCNN detection REQUIRES original color image for accuracy.
         # Converting grayscale->BGR produces DIFFERENT detections than original color!
