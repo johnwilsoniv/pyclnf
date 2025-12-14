@@ -951,14 +951,13 @@ class NURLMSOptimizer:
         # These are: scale, tx, ty, wx, wy, wz
         Lambda_inv[:6] = 0.0
 
-        # Shape parameters (indices 6+): use inverse eigenvalues
-        # NOTE: Clamping (np.clip(1/eigenvalues, 0.01, 1.0)) would match C++ better when
-        # starting from C++ landmarks, but makes tracking WORSE when starting from
-        # Python's pymtcnn detection. The two operate in different optimization basins.
-        # Without clamping: Local[0] can vary freely (better for Python's basin)
-        # With clamping: Local[0] constrained (matches C++ basin but hurts from Python init)
+        # Shape parameters (indices 6+): use reg_factor / eigenvalues
+        # C++ uses reg_factor = 22.5, but that's too strong for Python's pymtcnn init.
+        # Testing shows reg_factor=1.0 works best with Python's detection basin.
+        # Higher values over-constrain local params causing large landmark errors.
+        reg_factor = 1.0
         eigenvalues = pdm.eigen_values.flatten()
-        Lambda_inv[6:] = 1.0 / eigenvalues  # Unclamped - works better for Python's tracking
+        Lambda_inv[6:] = reg_factor / eigenvalues
 
         return Lambda_inv
 
@@ -1421,27 +1420,10 @@ class NURLMSOptimizer:
                     ms_y = mean_shift[lm_idx + n_points]
                     print(f"[DEBUG]     Landmark {lm_idx}: ({ms_x:.4f}, {ms_y:.4f})")
 
-        # CRITICAL DEBUG: Check mean-shift transform (last ditch effort to find 10x bug)
-        if iteration == 0 and window_size == 11:
-            print(f"\n[MS_TRANSFORM_DEBUG] iteration=0, window_size=11:")
-            print(f"[MS_TRANSFORM_DEBUG]   use_warping: {use_warping}")
-            if sim_ref_to_img is not None:
-                print(f"[MS_TRANSFORM_DEBUG]   sim_ref_to_img[0,0]: {sim_ref_to_img[0,0]:.6f}")
-                print(f"[MS_TRANSFORM_DEBUG]   sim_ref_to_img[1,0]: {sim_ref_to_img[1,0]:.6f}")
-                print(f"[MS_TRANSFORM_DEBUG]   sim_ref_to_img scale: {np.sqrt(sim_ref_to_img[0,0]**2 + sim_ref_to_img[1,0]**2):.6f}")
-            else:
-                print(f"[MS_TRANSFORM_DEBUG]   sim_ref_to_img: None!")
-            if sim_img_to_ref is not None:
-                print(f"[MS_TRANSFORM_DEBUG]   sim_img_to_ref[0,0]: {sim_img_to_ref[0,0]:.6f}")
-                print(f"[MS_TRANSFORM_DEBUG]   sim_img_to_ref scale: {np.sqrt(sim_img_to_ref[0,0]**2 + sim_img_to_ref[1,0]**2):.6f}")
-            else:
-                print(f"[MS_TRANSFORM_DEBUG]   sim_img_to_ref: None!")
-            print(f"[MS_TRANSFORM_DEBUG]   Total mean_shift sum: x={mean_shift[:n_points].sum():.2f}, y={mean_shift[n_points:].sum():.2f}")
-            print(f"[MS_TRANSFORM_DEBUG]   Mean-shift norm: {np.linalg.norm(mean_shift):.4f}")
-            # Check a few individual landmarks
-            for lm_idx in [0, 8, 36]:
-                if lm_idx in response_maps:
-                    print(f"[MS_TRANSFORM_DEBUG]   LM{lm_idx}: ms=({mean_shift[lm_idx]:.4f}, {mean_shift[lm_idx + n_points]:.4f})")
+        # DEBUG: Mean-shift transform debug (disabled for production)
+        # Set MS_TRANSFORM_DEBUG=1 env var to enable
+        # if os.environ.get('MS_TRANSFORM_DEBUG') and iteration == 0 and window_size == 11:
+        #     ... debug output ...
 
         return mean_shift
 
