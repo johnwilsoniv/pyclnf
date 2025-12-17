@@ -128,7 +128,7 @@ class CLNF:
         # These track previous frame's results for faster convergence on subsequent frames
         self._prev_frame_params = None
         self._prev_frame_landmarks = None
-        self._video_mode = (convergence_profile == 'video')
+        self._video_mode = True  # Default ON - enables tracking with previous frame params
 
         # Video-mode template tracking (matches C++ OpenFace)
         # Template matching corrects global parameters before optimization
@@ -137,7 +137,7 @@ class CLNF:
         self._template_init_box = None  # Bounding box when template was extracted (x_min, y_min, w, h)
         self._template_face_offset = None  # Offset of face bbox within template (dx, dy)
         self._template_scale = 0.3  # Scale factor for template (matches C++ face_template_scale)
-        self._use_template_tracking = False  # Disabled by default (matches C++ use_face_template=false)
+        self._use_template_tracking = True  # Default ON - template tracking for global param correction
         self._tracking_initialized = False  # Whether tracking has been initialized
 
         # C++ video tracking failure state (mirrors LandmarkDetectorFunc.cpp:215-289)
