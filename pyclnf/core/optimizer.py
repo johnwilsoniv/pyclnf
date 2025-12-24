@@ -740,16 +740,17 @@ class NURLMSOptimizer:
 
             # Early stopping: check if landmarks have converged
             # Only check after min_iterations to ensure we've made progress
-            # C++ OpenFace uses MAX per-landmark displacement, not total norm
+            # C++ OpenFace uses L2 norm of entire flattened shape vector (136 values)
+            # See LandmarkDetectorModel.cpp:603: if(norm(current_shape, previous_shape) < 0.01)
             if (rigid_iter >= self.min_iterations and
                 previous_landmarks is not None and
                 self.convergence_threshold > 0):
-                # Max per-landmark displacement (matches C++ OpenFace behavior)
-                per_landmark_change = np.linalg.norm(current_landmarks - previous_landmarks, axis=1)
-                shape_change = np.max(per_landmark_change)
+                # L2 norm of flattened shape difference (matches C++ cv::norm behavior)
+                shape_diff = (current_landmarks - previous_landmarks).flatten()  # (136,)
+                shape_change = np.linalg.norm(shape_diff)  # sqrt(sum(diff^2))
                 if self.debug_mode and window_size == 11:
                     print(f"[DEBUG] RIGID iter {rigid_iter}: shape_change = {shape_change:.6f} (threshold: 0.01)")
-                if shape_change < 0.01:  # Fixed threshold matching C++ line 1173
+                if shape_change < 0.01:  # Matches C++ exactly
                     rigid_converged = True
                     break
             previous_landmarks = current_landmarks.copy()
@@ -866,14 +867,15 @@ class NURLMSOptimizer:
 
             # Early stopping: check if landmarks have converged
             # Only check after min_iterations to ensure we've made progress
-            # C++ OpenFace uses MAX per-landmark displacement, not total norm
+            # C++ OpenFace uses L2 norm of entire flattened shape vector (136 values)
+            # See LandmarkDetectorModel.cpp:603: if(norm(current_shape, previous_shape) < 0.01)
             if (nonrigid_iter >= self.min_iterations and
                 previous_landmarks is not None and
                 self.convergence_threshold > 0):
-                # Max per-landmark displacement (matches C++ OpenFace behavior)
-                per_landmark_change = np.linalg.norm(current_landmarks - previous_landmarks, axis=1)
-                shape_change = np.max(per_landmark_change)
-                if shape_change < 0.01:  # Fixed threshold matching C++ line 1173
+                # L2 norm of flattened shape difference (matches C++ cv::norm behavior)
+                shape_diff = (current_landmarks - previous_landmarks).flatten()  # (136,)
+                shape_change = np.linalg.norm(shape_diff)  # sqrt(sum(diff^2))
+                if shape_change < 0.01:  # Matches C++ exactly
                     nonrigid_converged = True
                     break
             previous_landmarks = current_landmarks.copy()
