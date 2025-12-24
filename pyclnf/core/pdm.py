@@ -46,6 +46,16 @@ class PDM:
         # Parameter vector size: scale(1) + translation(2) + rotation(3) + shape(n_modes)
         self.n_params = 6 + self.n_modes
 
+        # Pre-allocate buffers for Jacobian computation (avoids repeated allocation)
+        self._J_buffer = np.zeros((2 * self.n_points, self.n_params), dtype=np.float64)
+        self._J_rigid_buffer = np.zeros((2 * self.n_points, 6), dtype=np.float64)
+
+        # Pre-extract principal component views for vectorized Jacobian
+        n = self.n_points
+        self._phi_x = self.princ_comp[:n, :]        # (n, m)
+        self._phi_y = self.princ_comp[n:2*n, :]     # (n, m)
+        self._phi_z = self.princ_comp[2*n:3*n, :]   # (n, m)
+
     def params_to_landmarks_3d(self, params: np.ndarray) -> np.ndarray:
         """
         Convert parameter vector to 3D landmark positions.
@@ -243,22 +253,15 @@ class PDM:
 
         # ==================================================================
         # NON-RIGID SHAPE PARAMETER DERIVATIVES (OpenFace PDM.cpp lines 414-420)
+        # Vectorized: compute all modes at once using pre-extracted views
         # ==================================================================
 
         # 4. Derivative w.r.t. shape parameters (columns 6:)
         # ∂x/∂qi = s * (r11·Φx[i] + r12·Φy[i] + r13·Φz[i])
         # ∂y/∂qi = s * (r21·Φx[i] + r22·Φy[i] + r23·Φz[i])
-        for i in range(self.n_modes):
-            phi_i = self.princ_comp[:, i]  # (3n,)
-
-            # Extract Φx, Φy, Φz for this mode
-            phi_x = phi_i[:n]
-            phi_y = phi_i[n:2*n]
-            phi_z = phi_i[2*n:3*n]
-
-            # Compute derivatives (STACKED format)
-            J[:n, 6 + i] = s * (r11 * phi_x + r12 * phi_y + r13 * phi_z)
-            J[n:, 6 + i] = s * (r21 * phi_x + r22 * phi_y + r23 * phi_z)
+        # Vectorized: (n, m) operations instead of loop over m modes
+        J[:n, 6:] = s * (r11 * self._phi_x + r12 * self._phi_y + r13 * self._phi_z)
+        J[n:, 6:] = s * (r21 * self._phi_x + r22 * self._phi_y + r23 * self._phi_z)
 
         return J
 
@@ -266,8 +269,8 @@ class PDM:
         """
         Compute Jacobian matrix for ONLY rigid (global) parameters.
 
-        This is used in the RIGID phase of two-phase optimization where we only
-        update scale, rotation, and translation while keeping shape params at 0.
+        Optimized version that only computes the 6 rigid columns, avoiding
+        the expensive shape parameter derivatives entirely.
 
         Args:
             params: Parameter vector [s, wx, wy, wz, tx, ty, q0, ..., qm]
@@ -275,11 +278,54 @@ class PDM:
         Returns:
             jacobian: Jacobian matrix, shape (2*n_points, 6) for rigid params only
         """
-        # Compute full Jacobian
-        J_full = self.compute_jacobian(params)
+        params = params.flatten()
 
-        # Return only rigid parameter columns (0-5: scale, wx, wy, wz, tx, ty)
-        return J_full[:, :6]
+        # Extract parameters
+        s = params[0]
+        wx, wy, wz = params[1], params[2], params[3]
+        q = params[6:]
+
+        # Compute 3D shape before rotation
+        shape_3d = self.mean_shape.flatten() + self.princ_comp @ q
+        n = self.n_points
+
+        X = shape_3d[:n]
+        Y = shape_3d[n:2*n]
+        Z = shape_3d[2*n:3*n]
+
+        # Compute rotation matrix
+        euler = np.array([wx, wy, wz])
+        R = self._euler_to_rotation_matrix(euler)
+
+        r11, r12, r13 = R[0, 0], R[0, 1], R[0, 2]
+        r21, r22, r23 = R[1, 0], R[1, 1], R[1, 2]
+
+        # Use pre-allocated buffer
+        J = self._J_rigid_buffer
+
+        # Scale derivatives
+        J[:n, 0] = X * r11 + Y * r12 + Z * r13
+        J[n:, 0] = X * r21 + Y * r22 + Z * r23
+
+        # Rotation derivatives
+        J[:n, 1] = s * (Y * r13 - Z * r12)
+        J[n:, 1] = s * (Y * r23 - Z * r22)
+
+        J[:n, 2] = -s * (X * r13 - Z * r11)
+        J[n:, 2] = -s * (X * r23 - Z * r21)
+
+        J[:n, 3] = s * (X * r12 - Y * r11)
+        J[n:, 3] = s * (X * r22 - Y * r21)
+
+        # Translation derivatives
+        J[:n, 4] = 1.0
+        J[n:, 5] = 1.0
+
+        # Clear unused columns (in case of previous use)
+        J[:n, 5] = 0.0
+        J[n:, 4] = 0.0
+
+        return J
 
     def _euler_to_rotation_matrix(self, euler: np.ndarray) -> np.ndarray:
         """
