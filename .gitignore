@@ -93,11 +93,13 @@ celerybeat.pid
 # Documentation
 docs/_build/
 
-# Large model files - download separately
+# Large model files - download separately (eye models only)
 pyclnf/models/exported_eye_ccnf_left/
 pyclnf/models/exported_eye_ccnf_right/
 pyclnf/models/exported_eye_pdm_left/
 pyclnf/models/exported_eye_pdm_right/
-pyclnf/models/patch_experts/*.dat
-*.npz
-*.npy
+
+# Keep model files in package (required for PyPI)
+# pyclnf/models/patch_experts/*.dat - INCLUDED
+# pyclnf/models/**/*.npz - INCLUDED
+# pyclnf/models/**/*.npy - INCLUDED
