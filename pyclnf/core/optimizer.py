@@ -280,7 +280,7 @@ class NURLMSOptimizer:
                  use_peak_confidence: bool = False,
                  use_direct_kde: bool = True,  # True enables fast vectorized mean-shift (2x faster)
                  use_cpp_warp: bool = True,  # Use C++ warpAffine for exact OpenCV 4.12 matching
-                 use_gpu: bool = False,  # Enable GPU acceleration for response maps and mean-shift
+                 use_gpu: bool = True,  # Enable GPU acceleration for response maps and mean-shift
                  gpu_device: str = 'mps'):  # GPU device: 'mps' (Apple), 'cuda', or 'cpu'
         """
         Initialize NU-RLMS optimizer.
@@ -337,7 +337,19 @@ class NURLMSOptimizer:
 
         # GPU acceleration setup
         self.use_gpu = use_gpu and BATCHED_CEN_AVAILABLE and GPU_MEAN_SHIFT_AVAILABLE
-        self.gpu_device = gpu_device
+
+        # Auto-detect best GPU device
+        if gpu_device == 'auto':
+            import torch
+            if torch.backends.mps.is_available():
+                self.gpu_device = 'mps'
+            elif torch.cuda.is_available():
+                self.gpu_device = 'cuda'
+            else:
+                self.gpu_device = 'cpu'
+        else:
+            self.gpu_device = gpu_device
+
         if use_gpu and not self.use_gpu:
             import warnings
             missing = []
