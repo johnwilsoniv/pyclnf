@@ -537,6 +537,9 @@ class CENPatchExperts:
         self.patch_experts = []
         self.mirror_inds = None  # Will store mirror indices (same for all scales)
 
+        # Check if models exist, download if needed
+        self._ensure_models_exist()
+
         # Load all scale levels
         print(f"Loading CEN patch experts (410 MB, ~5-10 seconds)...")
         for idx, scale in enumerate(self.patch_scaling):
@@ -545,7 +548,10 @@ class CENPatchExperts:
                 # Try patch_experts subdirectory
                 scale_file = self.model_dir / "patch_experts" / f"cen_patches_{scale:.2f}_of.dat"
             if not scale_file.exists():
-                raise FileNotFoundError(f"CEN model not found: {scale_file}")
+                raise FileNotFoundError(
+                    f"CEN model not found: {scale_file}\n"
+                    "Run: python -m pyclnf.model_downloader"
+                )
 
             print(f"  [{idx+1}/4] Loading scale {scale}...")
             experts_at_scale, mirror_inds = self._load_scale(scale_file)
@@ -556,6 +562,29 @@ class CENPatchExperts:
                 self.mirror_inds = mirror_inds.flatten().astype(int)
 
             print(f"      ✓ {len(experts_at_scale)} patch experts loaded")
+
+    def _ensure_models_exist(self):
+        """Check if model files exist, attempt download if not."""
+        # Check for any scale file
+        for scale in self.patch_scaling:
+            scale_file = self.model_dir / f"cen_patches_{scale:.2f}_of.dat"
+            if scale_file.exists():
+                return  # At least one file exists in model_dir
+            scale_file = self.model_dir / "patch_experts" / f"cen_patches_{scale:.2f}_of.dat"
+            if scale_file.exists():
+                return  # At least one file exists in patch_experts subdir
+
+        # No models found - try to download
+        print("CEN patch expert models not found. Attempting download...")
+        try:
+            from ..model_downloader import download_models
+            if not download_models():
+                print("Model download failed. Please download manually from:")
+                print("  https://github.com/johnwilsoniv/pyclnf/releases")
+        except Exception as e:
+            print(f"Could not download models: {e}")
+            print("Please download manually from:")
+            print("  https://github.com/johnwilsoniv/pyclnf/releases")
 
     def _load_scale(self, dat_file):
         """
