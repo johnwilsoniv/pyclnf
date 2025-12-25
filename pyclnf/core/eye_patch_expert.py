@@ -443,14 +443,29 @@ class HierarchicalEyeModel:
     accurate eye landmark detection using NU-RLMS optimization.
     """
 
-    def __init__(self, model_dir: str):
+    def __init__(self, model_dir: str, use_gpu: bool = True, gpu_device: str = 'auto'):
         """
         Load hierarchical eye models for both eyes.
 
         Args:
             model_dir: Base directory containing exported eye models
+            use_gpu: Whether to use GPU for batched computation
+            gpu_device: GPU device ('auto', 'mps', 'cuda', 'cpu')
         """
         self.model_dir = Path(model_dir)
+        self.use_gpu = use_gpu
+
+        # Auto-detect GPU device
+        if gpu_device == 'auto':
+            import torch
+            if torch.backends.mps.is_available():
+                self.gpu_device = 'mps'
+            elif torch.cuda.is_available():
+                self.gpu_device = 'cuda'
+            else:
+                self.gpu_device = 'cpu'
+        else:
+            self.gpu_device = gpu_device
 
         # Load PDMs for both eyes
         self.pdm = {
@@ -479,6 +494,19 @@ class HierarchicalEyeModel:
             'left': EyeCCNFModel(str(self.model_dir), 'left'),
             'right': EyeCCNFModel(str(self.model_dir), 'right')
         }
+
+        # Create batched CCNF for GPU acceleration
+        self.batched_ccnf = {'left': {}, 'right': {}}
+        if self.use_gpu:
+            try:
+                from .batched_eye_ccnf import BatchedEyeCCNF
+                for side in ['left', 'right']:
+                    self.batched_ccnf[side] = BatchedEyeCCNF(
+                        self.ccnf[side], device=self.gpu_device
+                    )
+            except ImportError as e:
+                print(f"Warning: Could not load BatchedEyeCCNF: {e}")
+                self.use_gpu = False
 
         # Eye refinement parameters (OpenFace defaults for eye model)
         # C++ configures [3, 5, 9] but only uses [3, 5] at runtime because
@@ -626,7 +654,8 @@ class HierarchicalEyeModel:
             )
 
             response_maps = self._compute_eye_response_maps(
-                scaled_image, initial_eye_landmarks, patch_experts, sim_ref_to_img
+                scaled_image, initial_eye_landmarks, patch_experts, sim_ref_to_img,
+                side=side, patch_scale=patch_scale
             )
 
             # Run RIGID phase first (like C++)
@@ -635,7 +664,7 @@ class HierarchicalEyeModel:
                 # Pass sim_img_to_ref to transform offsets to reference space (like C++)
                 mean_shift = self._compute_eye_mean_shift_with_offset(
                     eye_landmarks, initial_eye_landmarks, response_maps, patch_experts,
-                    sim_img_to_ref
+                    sim_img_to_ref, side=side
                 )
 
                 # Transform mean-shifts from reference space to image space (like C++)
@@ -691,7 +720,7 @@ class HierarchicalEyeModel:
                 # Compute mean-shift at current positions (offset from INITIAL base - same as RIGID)
                 mean_shift = self._compute_eye_mean_shift_with_offset(
                     eye_landmarks, initial_eye_landmarks, response_maps, patch_experts,
-                    sim_img_to_ref
+                    sim_img_to_ref, side=side
                 )
 
                 # Transform mean-shifts from reference space to image space (like C++)
@@ -793,7 +822,9 @@ class HierarchicalEyeModel:
     def _compute_eye_response_maps(self, image: np.ndarray,
                                    eye_landmarks: np.ndarray,
                                    patch_experts: dict,
-                                   sim_ref_to_img: np.ndarray = None) -> dict:
+                                   sim_ref_to_img: np.ndarray = None,
+                                   side: str = None,
+                                   patch_scale: float = None) -> dict:
         """
         Compute response maps for each eye landmark using CCNF patches.
 
@@ -805,12 +836,27 @@ class HierarchicalEyeModel:
             eye_landmarks: Current 28 eye landmarks
             patch_experts: Dict mapping landmark_idx -> EyeCCNFPatchExpert
             sim_ref_to_img: 2x2 similarity transform from reference to image space
+            side: 'left' or 'right' eye (for GPU batched computation)
+            patch_scale: Patch scale (1.0 or 1.5) for GPU batched computation
 
         Returns:
             response_maps: Dict mapping landmark_idx -> response_map
         """
-        response_maps = {}
         ws = getattr(self, '_current_window_size', self.window_sizes[0])
+
+        # Use GPU batched computation if available
+        if self.use_gpu and side is not None and patch_scale is not None:
+            batched = self.batched_ccnf.get(side)
+            if batched and hasattr(batched, 'compute_response_maps'):
+                return batched.compute_response_maps(
+                    image.astype(np.float32),
+                    eye_landmarks,
+                    patch_scale,
+                    ws,
+                    sim_ref_to_img
+                )
+
+        response_maps = {}
 
         # Get a1, b1 from similarity transform (like C++)
         if sim_ref_to_img is not None:
@@ -1046,7 +1092,8 @@ class HierarchicalEyeModel:
                                            base_landmarks: np.ndarray,
                                            response_maps: dict,
                                            patch_experts: dict,
-                                           sim_img_to_ref: np.ndarray = None) -> np.ndarray:
+                                           sim_img_to_ref: np.ndarray = None,
+                                           side: str = None) -> np.ndarray:
         """
         Compute mean-shift vector using precomputed response maps and offset tracking.
 
@@ -1062,17 +1109,32 @@ class HierarchicalEyeModel:
             response_maps: Dict of precomputed response maps per landmark
             patch_experts: Dict of patch experts
             sim_img_to_ref: 2x2 similarity transform from image to reference space
+            side: 'left' or 'right' eye (for GPU batched computation)
 
         Returns:
             mean_shift: Mean-shift vector (2 * n_points,) in REFERENCE space
         """
+        # Use GPU batched computation if available
+        sigma = getattr(self, '_current_sigma', self.sigma)
+        ws = getattr(self, '_current_window_size', self.window_sizes[0])
+
+        if self.use_gpu and side is not None:
+            batched = self.batched_ccnf.get(side)
+            if batched and hasattr(batched, 'compute_mean_shift_batched'):
+                return batched.compute_mean_shift_batched(
+                    response_maps,
+                    eye_landmarks,
+                    base_landmarks,
+                    ws,
+                    sigma,
+                    sim_img_to_ref
+                )
+
+        # Fallback to Python implementation
         n_points = len(eye_landmarks)
         mean_shift = np.zeros(2 * n_points)
 
-        # Gaussian kernel parameter (use scaled sigma if available)
-        sigma = getattr(self, '_current_sigma', self.sigma)
         a_kde = -0.5 / (sigma * sigma)
-        ws = getattr(self, '_current_window_size', self.window_sizes[0])
         center = (ws - 1) / 2.0
 
         for lm_idx, response_map in response_maps.items():

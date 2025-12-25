@@ -37,6 +37,12 @@ class EyePDM:
         # Parameter vector size: scale(1) + rotation(3) + translation(2) + shape(n_modes)
         self.n_params = 6 + self.n_modes
 
+        # Pre-slice principal components for vectorized Jacobian computation
+        n = self.n_points
+        self._princ_comp_x = self.princ_comp[:n, :]      # (28, 10)
+        self._princ_comp_y = self.princ_comp[n:2*n, :]   # (28, 10)
+        self._princ_comp_z = self.princ_comp[2*n:3*n, :] # (28, 10)
+
     def params_to_landmarks_3d(self, params: np.ndarray) -> np.ndarray:
         """
         Convert parameter vector to 3D landmark positions.
@@ -170,15 +176,10 @@ class EyePDM:
         J[:n, 4] = 1.0
         J[n:, 5] = 1.0
 
-        # 4. Derivative w.r.t. shape parameters (columns 6:)
-        for i in range(self.n_modes):
-            phi_i = self.princ_comp[:, i]
-            phi_x = phi_i[:n]
-            phi_y = phi_i[n:2*n]
-            phi_z = phi_i[2*n:3*n]
-
-            J[:n, 6 + i] = s * (r11 * phi_x + r12 * phi_y + r13 * phi_z)
-            J[n:, 6 + i] = s * (r21 * phi_x + r22 * phi_y + r23 * phi_z)
+        # 4. Derivative w.r.t. shape parameters (columns 6:) - VECTORIZED
+        # Uses pre-sliced principal components for ~2x speedup
+        J[:n, 6:] = s * (r11 * self._princ_comp_x + r12 * self._princ_comp_y + r13 * self._princ_comp_z)
+        J[n:, 6:] = s * (r21 * self._princ_comp_x + r22 * self._princ_comp_y + r23 * self._princ_comp_z)
 
         return J
 
