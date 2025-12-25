@@ -5,6 +5,7 @@ include pyproject.toml
 # Include all model files
 recursive-include pyclnf/models *.npz
 recursive-include pyclnf/models *.npy
+recursive-include pyclnf/models *.dat
 
 # Exclude development files
 global-exclude *.pyc

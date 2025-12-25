@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyclnf"
-version = "0.2.2"
+version = "0.2.3"
 description = "Pure Python implementation of CLNF (Constrained Local Neural Fields) facial landmark detector"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -61,6 +61,7 @@ packages = ["pyclnf", "pyclnf.core", "pyclnf.utils", "pyclnf.models"]
 pyclnf = [
     "models/**/*.npz",
     "models/**/*.npy",
+    "models/**/*.dat",
 ]
 
 [tool.black]
