@@ -1,3 +1,4 @@
+*.dat filter=lfs diff=lfs merge=lfs -text
 pyclnf/models/exported_inner_ccnf/** filter=lfs diff=lfs merge=lfs -text
 pyclnf/models/exported_inner_pdm/** filter=lfs diff=lfs merge=lfs -text
 pyclnf/models/exported_pdm/** filter=lfs diff=lfs merge=lfs -text
