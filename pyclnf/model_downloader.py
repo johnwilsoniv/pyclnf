@@ -118,7 +118,9 @@ def download_models(force=False):
             print(f"  ✓ {rel_path} (already exists)")
             continue
 
-        url = f"{GITHUB_RELEASE_URL}/{rel_path.replace('/', '_')}"
+        # Use just the filename for the URL (GitHub release strips directory)
+        filename = Path(rel_path).name
+        url = f"{GITHUB_RELEASE_URL}/{filename}"
         print(f"  Downloading {rel_path}...")
 
         if not download_file(url, dest_path, info.get("size")):
