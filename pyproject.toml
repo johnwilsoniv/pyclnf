@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyclnf"
-version = "0.2.8"
+version = "0.2.9"
 description = "Pure Python implementation of CLNF (Constrained Local Neural Fields) facial landmark detector"
 readme = "README.md"
 requires-python = ">=3.8"
