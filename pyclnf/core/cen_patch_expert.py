@@ -212,7 +212,7 @@ class CENPatchExpert:
         # im2col_bias generates patches in column-major order (x outer loop, y inner loop)
         response = layer_output_flat.reshape(response_height, response_width, order='F')
 
-        return response.astype(np.float32)
+        return response.astype(np.float32, copy=False)
 
     def response_sparse(self, area_of_interest_left, area_of_interest_right):
         """
@@ -263,7 +263,7 @@ class CENPatchExpert:
 
         # Process right AOI: flip horizontally BEFORE sparse im2col (like C++ line 555)
         if right_provided:
-            aoi_right_flipped = cv2.flip(area_of_interest_right.astype(np.float32), 1)
+            aoi_right_flipped = cv2.flip(area_of_interest_right.astype(np.float32, copy=False), 1)
             response_height = aoi_right_flipped.shape[0] - self.height_support + 1
             input_height = aoi_right_flipped.shape[0]
             input_width = aoi_right_flipped.shape[1]
@@ -279,7 +279,7 @@ class CENPatchExpert:
             input_width = area_of_interest_left.shape[1]
             # Use sparse im2col with contrast norm (like C++ im2colBiasSparseContrastNorm)
             im2col_left = im2col_bias_sparse_contrast_norm(
-                area_of_interest_left.astype(np.float32),
+                area_of_interest_left.astype(np.float32, copy=False),
                 self.width_support, self.height_support
             )
 
@@ -347,8 +347,8 @@ class CENPatchExpert:
         if response_right is not None:
             response_right = cv2.flip(response_right, 1)
 
-        return response_left.astype(np.float32) if response_left is not None else None, \
-               response_right.astype(np.float32) if response_right is not None else None
+        return response_left.astype(np.float32, copy=False) if response_left is not None else None, \
+               response_right.astype(np.float32, copy=False) if response_right is not None else None
 
 
 class MirroredCENPatchExpert:
@@ -409,7 +409,7 @@ class MirroredCENPatchExpert:
             response: Response map with flipping applied
         """
         # Step 1: Flip input horizontally (cv2.flip with axis=1)
-        flipped_input = cv2.flip(area_of_interest.astype(np.float32), 1)
+        flipped_input = cv2.flip(area_of_interest.astype(np.float32, copy=False), 1)
 
         # Step 2: Run through mirror expert's neural network
         flipped_response = self._mirror_expert.response(flipped_input)

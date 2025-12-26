@@ -177,7 +177,7 @@ class CCNFPatchExpert:
         if min_val < 0:
             response = response - min_val
 
-        return response.astype(np.float32)
+        return response.astype(np.float32, copy=False)
 
 
 class CCNFSigmaComputation:

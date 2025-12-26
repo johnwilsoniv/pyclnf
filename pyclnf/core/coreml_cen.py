@@ -380,7 +380,7 @@ class CoreMLBatchedCEN:
                 )
                 if lm_idx in self.mirror_indices:
                     response = self.cv2.flip(response, 1)
-                response_maps[lm_idx] = response.astype(np.float32)
+                response_maps[lm_idx] = response.astype(np.float32, copy=False)
             else:
                 response_maps[lm_idx] = np.zeros(
                     (response_height, response_width), dtype=np.float32

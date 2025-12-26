@@ -237,7 +237,7 @@ class MultiScaleBatchedCEN:
                                           crop_offset:crop_offset+target_ws]
                     if lm_idx in cen.mirror_indices:
                         response = cv2.flip(response, 1)
-                    response_maps[lm_idx] = response.astype(np.float32)
+                    response_maps[lm_idx] = response.astype(np.float32, copy=False)
                 else:
                     response_maps[lm_idx] = np.zeros(
                         (target_ws, target_ws), dtype=np.float32
