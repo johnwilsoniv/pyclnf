@@ -606,7 +606,7 @@ class BatchedCEN:
                 )
                 if lm_idx in self.mirror_indices:
                     response = cv2.flip(response, 1)
-                response_maps[lm_idx] = response.astype(np.float32)
+                response_maps[lm_idx] = response.astype(np.float32, copy=False)
             else:
                 response_maps[lm_idx] = np.zeros(
                     (response_height, response_width), dtype=np.float32
@@ -667,7 +667,7 @@ class BatchedCEN:
                 if lm_idx in self.mirror_indices:
                     response = cv2.flip(response, 1)
 
-                response_maps[lm_idx] = response.astype(np.float32)
+                response_maps[lm_idx] = response.astype(np.float32, copy=False)
             else:
                 # Return zero response for invalid landmarks
                 response_maps[lm_idx] = np.zeros(
