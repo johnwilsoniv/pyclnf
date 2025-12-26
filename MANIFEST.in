@@ -7,6 +7,9 @@ recursive-include pyclnf/models *.npz
 recursive-include pyclnf/models *.npy
 recursive-include pyclnf/models *.dat
 
+# Include cpp_warp C extension
+include pyclnf/cpp_warp/*.so
+
 # Exclude development files
 global-exclude *.pyc
 global-exclude __pycache__
