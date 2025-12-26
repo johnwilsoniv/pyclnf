@@ -849,7 +849,7 @@ class HierarchicalEyeModel:
             batched = self.batched_ccnf.get(side)
             if batched and hasattr(batched, 'compute_response_maps'):
                 return batched.compute_response_maps(
-                    image.astype(np.float32),
+                    image.astype(np.float32, copy=False),
                     eye_landmarks,
                     patch_scale,
                     ws,
@@ -892,7 +892,7 @@ class HierarchicalEyeModel:
 
             # Extract area of interest using warpAffine with WARP_INVERSE_MAP
             area_of_interest = cv2.warpAffine(
-                image.astype(np.float32),
+                image.astype(np.float32, copy=False),
                 sim,
                 (aoi_size, aoi_size),
                 flags=cv2.WARP_INVERSE_MAP + cv2.INTER_LINEAR
