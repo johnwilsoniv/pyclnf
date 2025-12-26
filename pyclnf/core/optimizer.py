@@ -444,10 +444,10 @@ class NURLMSOptimizer:
         if self.use_cpp_warp:
             # Use C++ wrapper for exact OpenCV 4.12 matching
             return cpp_warp.extract_aoi(
-                image.astype(np.float32),
+                image.astype(np.float32, copy=False),
                 float(center_x),
                 float(center_y),
-                sim_ref_to_img.astype(np.float64),
+                sim_ref_to_img.astype(np.float64, copy=False),
                 int(aoi_size)
             )
         else:
@@ -1011,9 +1011,12 @@ class NURLMSOptimizer:
         Lambda_inv[:6] = 0.0
 
         # Shape parameters (indices 6+): use reg_factor / eigenvalues
-        # C++ uses reg_factor = 22.5, but that's too strong for Python's pymtcnn init.
-        # Testing shows reg_factor=1.0 works best with Python's detection basin.
-        # Higher values over-constrain local params causing large landmark errors.
+        # C++ uses reg_factor = 22.5. Testing showed:
+        #   reg_factor=1.0:  4/17 AUs pass
+        #   reg_factor=5.0:  5/17 AUs pass
+        #   reg_factor=10.0: 5/17 AUs pass
+        #   reg_factor=22.5: 6/17 AUs pass but CLNF doesn't converge
+        # Keeping 1.0 for now; issue is deeper than regularization.
         reg_factor = 1.0
         eigenvalues = pdm.eigen_values.flatten()
         Lambda_inv[6:] = reg_factor / eigenvalues
