@@ -96,8 +96,4 @@ docs/_build/
 # Large model files - downloaded on first use from GitHub releases
 pyclnf/models/patch_experts/*.dat
 
-# Eye models (optional, for eye refinement)
-pyclnf/models/exported_eye_ccnf_left/
-pyclnf/models/exported_eye_ccnf_right/
-pyclnf/models/exported_eye_pdm_left/
-pyclnf/models/exported_eye_pdm_right/
+# Eye models are now included in the package (tracked with LFS)
