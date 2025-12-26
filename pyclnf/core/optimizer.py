@@ -39,14 +39,8 @@ from .cen_patch_expert import MirroredCENPatchExpert, CENPatchExpert
 # Try to import cpp_warp for exact OpenCV 4.12 matching with C++ OpenFace
 # This is optional - falls back to cv2.warpAffine if not available
 try:
-    import sys
-    _cpp_warp_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'cpp_warp')
-    if _cpp_warp_path not in sys.path:
-        sys.path.insert(0, _cpp_warp_path)
-    import cpp_warp
-    # Verify the C extension actually loaded (not just a namespace package)
-    if not hasattr(cpp_warp, 'extract_aoi'):
-        raise ImportError("cpp_warp module missing extract_aoi function")
+    from pyclnf.cpp_warp import extract_aoi
+    import pyclnf.cpp_warp as cpp_warp
     CPP_WARP_AVAILABLE = True
 except ImportError:
     cpp_warp = None
