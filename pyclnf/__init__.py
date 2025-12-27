@@ -24,7 +24,7 @@ Components:
 from .clnf import CLNF
 from .core import PDM, CCNFModel, CCNFPatchExpert, NURLMSOptimizer
 
-__version__ = "0.2.0"
+__version__ = "0.3.2"
 __all__ = [
     'CLNF',
     'PDM',
