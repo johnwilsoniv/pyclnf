@@ -1333,6 +1333,42 @@ class CLNF:
             self.optimizer.cached_landmarks = None
             self.optimizer.cache_age = 0
 
+    def clear_gpu_cache(self):
+        """
+        Clear GPU memory caches to prevent memory accumulation.
+
+        Call this between videos to release MPS/CUDA memory and prevent
+        performance degradation from memory fragmentation.
+        """
+        # Clear grid caches in multiscale CEN
+        if hasattr(self, 'ccnf') and self.ccnf is not None:
+            if hasattr(self.ccnf, 'multiscale_cen') and self.ccnf.multiscale_cen is not None:
+                if hasattr(self.ccnf.multiscale_cen, '_grid_cache'):
+                    self.ccnf.multiscale_cen._grid_cache.clear()
+                # Clear caches in individual BatchedCEN instances
+                if hasattr(self.ccnf.multiscale_cen, 'batched_cens'):
+                    for scale, cen in self.ccnf.multiscale_cen.batched_cens.items():
+                        if hasattr(cen, '_reorder_cache'):
+                            cen._reorder_cache.clear()
+                        if hasattr(cen, '_im2col_cache'):
+                            cen._im2col_cache.clear()
+
+        # Release GPU memory
+        try:
+            import torch
+            if torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+                torch.mps.synchronize()  # Ensure all operations complete
+            elif torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+        except Exception:
+            pass
+
+        # Force garbage collection
+        import gc
+        gc.collect()
+
     def get_info(self) -> Dict:
         """Get model information."""
         return {
