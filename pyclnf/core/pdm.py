@@ -1511,12 +1511,12 @@ def test_pdm():
     print(f"  Max error: {max(errors):.2e} (should be < 1e-4)")
 
     if max(errors) < 1e-4:
-        print("  ✓ Jacobian accuracy verified!")
+        print("  [OK] Jacobian accuracy verified!")
     else:
-        print("  ⚠ Jacobian may have numerical issues")
+        print("  [WARNING] Jacobian may have numerical issues")
 
     print("\n" + "=" * 60)
-    print("✓ PDM Core Implementation Tests Complete!")
+    print("[OK] PDM Core Implementation Tests Complete!")
     print("=" * 60)
 
 

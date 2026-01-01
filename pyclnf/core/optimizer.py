@@ -2564,7 +2564,7 @@ def test_optimizer():
     print(f"  Landmarks moved > 1px: {np.sum(landmark_shift > 1.0)}")
 
     print("\n" + "=" * 60)
-    print("✓ NU-RLMS Optimizer Tests Complete!")
+    print("[OK] NU-RLMS Optimizer Tests Complete!")
     print("=" * 60)
 
 

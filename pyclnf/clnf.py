@@ -218,7 +218,7 @@ class CLNF:
         )
 
         if use_gpu and self.optimizer.use_gpu:
-            print(f"✓ GPU acceleration enabled (device: {gpu_device})")
+            print(f"[OK] GPU acceleration enabled (device: {gpu_device})")
 
         # Initialize eye refinement model if enabled
         self.use_eye_refinement = use_eye_refinement
@@ -231,7 +231,7 @@ class CLNF:
                     gpu_device=gpu_device
                 )
                 gpu_status = " (GPU)" if self.eye_model.use_gpu else ""
-                print(f"✓ Eye refinement model loaded{gpu_status}")
+                print(f"[OK] Eye refinement model loaded{gpu_status}")
             except Exception as e:
                 print(f"Warning: Could not load eye refinement model: {e}")
                 self.use_eye_refinement = False
@@ -243,7 +243,7 @@ class CLNF:
             try:
                 from .core.inner_model import HierarchicalInnerModel
                 self.inner_model = HierarchicalInnerModel(str(self.model_dir))
-                print("✓ Inner refinement model loaded")
+                print("[OK] Inner refinement model loaded")
             except Exception as e:
                 print(f"Warning: Could not load inner refinement model: {e}")
                 self.use_inner_refinement = False
@@ -259,7 +259,7 @@ class CLNF:
                 sys.path.insert(0, str(Path(__file__).parent.parent / "pymtcnn"))
                 from pymtcnn import MTCNN
                 self.detector = MTCNN()
-                print("✓ PyMTCNN detector initialized (CoreML/ONNX auto-selection)")
+                print("[OK] PyMTCNN detector initialized (CoreML/ONNX auto-selection)")
             except Exception as e:
                 print(f"Warning: Could not initialize PyMTCNN detector: {e}")
                 print("Detector will not be available. Use fit() with manual bbox instead.")
@@ -273,7 +273,7 @@ class CLNF:
                     model_path=detector_model_path,
                     use_coreml=use_coreml
                 )
-                print("✓ RetinaFace detector initialized")
+                print("[OK] RetinaFace detector initialized")
             except Exception as e:
                 print(f"Warning: Could not initialize RetinaFace detector: {e}")
                 print("Detector will not be available. Use fit() with manual bbox instead.")
@@ -1457,7 +1457,7 @@ def test_clnf():
     print(f"  Landmark shift from first fit: {np.linalg.norm(landmarks2 - landmarks, axis=1).mean():.1f} pixels")
 
     print("\n" + "=" * 60)
-    print("✓ Complete CLNF Pipeline Tests Complete!")
+    print("[OK] Complete CLNF Pipeline Tests Complete!")
     print("=" * 60)
     print("\nCLNF is ready to use!")
     print("  - Pure Python implementation (no C++ dependencies)")

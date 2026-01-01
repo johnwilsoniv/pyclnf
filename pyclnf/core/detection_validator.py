@@ -319,7 +319,7 @@ class DetectionValidator:
                 paw.read(f)
                 self.paws[i] = paw
 
-        print(f"✓ Detection validator loaded ({n} views)")
+        print(f"[OK] Detection validator loaded ({n} views)")
 
     def get_view_id(self, orientation: np.ndarray) -> int:
         """Get the best view ID for the given orientation."""

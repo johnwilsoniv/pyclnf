@@ -561,7 +561,7 @@ class CENPatchExperts:
             if self.mirror_inds is None:
                 self.mirror_inds = mirror_inds.flatten().astype(int)
 
-            print(f"      ✓ {len(experts_at_scale)} patch experts loaded")
+            print(f"      [OK] {len(experts_at_scale)} patch experts loaded")
 
     def _ensure_models_exist(self):
         """Check if model files exist, attempt download if not."""
