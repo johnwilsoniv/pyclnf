@@ -227,7 +227,7 @@ class RetinaFaceCorrectedDetector:
             model_data = joblib.load(correction_model_path)
             self.correction_model = model_data
             self.use_model_correction = True
-            print(f"✓ Loaded Tier 2 bbox correction model: {correction_model_path}")
+            print(f"[OK] Loaded Tier 2 bbox correction model: {correction_model_path}")
             print(f"  Performance: {model_data['overall_metrics']['improvement_percent']:.1f}% improvement")
         except Exception as e:
             print(f"Note: Tier 2 model not found, using V2 fixed correction (fallback)")

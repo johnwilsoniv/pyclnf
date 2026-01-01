@@ -457,7 +457,7 @@ class CCNFPatchExpertLoader:
 
             print(f"  View {view_idx}: Exported {non_empty_count}/{self.num_landmarks} non-empty patches")
 
-        print(f"\n✓ Export complete: {self.num_views} views × {self.num_landmarks} patches")
+        print(f"\n[OK] Export complete: {self.num_views} views × {self.num_landmarks} patches")
 
     def get_info(self) -> Dict[str, Any]:
         """Get patch expert collection information for multi-view structure."""
@@ -541,7 +541,7 @@ def test_pdm_loader():
     print(f"  Loaded princ_comp: {princ_comp.shape}, dtype: {princ_comp.dtype}")
     print(f"  Loaded eigen_values: {eigen_values.shape}, dtype: {eigen_values.dtype}")
 
-    print("\n✓ PDM loading and export successful!")
+    print("\n[OK] PDM loading and export successful!")
     return True
 
 
@@ -580,11 +580,11 @@ def test_ccnf_loader():
             print(f"  View 0, Patch 0, Neuron 0 keys: {list(patch_neuron.keys())}")
             print(f"  Neuron weights shape: {patch_neuron['weights'].shape}")
 
-        print("\n✓ CCNF loading and export successful!")
+        print("\n[OK] CCNF loading and export successful!")
         return True
 
     except Exception as e:
-        print(f"\n✗ CCNF loading failed: {e}")
+        print(f"\n[FAILED] CCNF loading failed: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -643,5 +643,5 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("Summary")
     print("=" * 60)
-    print(f"PDM:  {'✓ PASS' if pdm_success else '✗ FAIL'}")
-    print(f"CCNF: {'✓ PASS' if ccnf_success else '✗ FAIL'}")
+    print(f"PDM:  {'[OK] PASS' if pdm_success else '[FAILED] FAIL'}")
+    print(f"CCNF: {'[OK] PASS' if ccnf_success else '[FAILED] FAIL'}")

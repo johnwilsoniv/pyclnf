@@ -115,7 +115,7 @@ def download_models(force=False):
         dest_path = models_dir / rel_path
 
         if not force and dest_path.exists():
-            print(f"  ✓ {rel_path} (already exists)")
+            print(f"  [OK] {rel_path} (already exists)")
             continue
 
         # Use just the filename for the URL (GitHub release strips directory)
@@ -125,9 +125,9 @@ def download_models(force=False):
 
         if not download_file(url, dest_path, info.get("size")):
             success = False
-            print(f"  ✗ Failed to download {rel_path}")
+            print(f"  [FAILED] Failed to download {rel_path}")
         else:
-            print(f"  ✓ {rel_path}")
+            print(f"  [OK] {rel_path}")
 
     if success:
         print()

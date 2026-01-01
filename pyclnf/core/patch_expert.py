@@ -231,9 +231,9 @@ class CCNFPatchExpert:
             for i, sc in enumerate(sigma_components):
                 expected_shape = (matrix_size, matrix_size)
                 if sc.shape != expected_shape:
-                    print(f"    [Sigma Debug] ⚠️  WARNING: sigma_component[{i}] shape {sc.shape} != expected {expected_shape}")
+                    print(f"    [Sigma Debug] [WARNING]  WARNING: sigma_component[{i}] shape {sc.shape} != expected {expected_shape}")
                 else:
-                    print(f"    [Sigma Debug] ✓ sigma_component[{i}] shape {sc.shape} correct")
+                    print(f"    [Sigma Debug] [OK] sigma_component[{i}] shape {sc.shape} correct")
 
         # q1 = sum_alphas * Identity
         q1 = sum_alphas * np.eye(matrix_size, dtype=np.float32)
@@ -271,7 +271,7 @@ class CCNFPatchExpert:
             # Try Cholesky decomposition first (OpenFace method)
             Sigma = np.linalg.inv(SigmaInv)
             if debug:
-                print(f"    [Sigma Debug] ✓ Cholesky inversion succeeded")
+                print(f"    [Sigma Debug] [OK] Cholesky inversion succeeded")
         except np.linalg.LinAlgError:
             # Fallback to pseudo-inverse if matrix is singular
             print(f"Warning: Singular SigmaInv matrix for patch {self.width}×{self.height}, using pseudo-inverse")
@@ -525,7 +525,7 @@ def test_patch_expert():
         print(f"  Pose {pose} -> View {best_view}")
 
     print("\n" + "=" * 60)
-    print("✓ LNF Patch Expert Tests Complete!")
+    print("[OK] LNF Patch Expert Tests Complete!")
     print("=" * 60)
 
 

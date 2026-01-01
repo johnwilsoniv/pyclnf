@@ -18,7 +18,7 @@ def main():
     # Initialize CLNF with built-in PyMTCNN detector
     print("\n1. Initializing CLNF...")
     clnf = CLNF()  # Automatically initializes PyMTCNN
-    print("   ✓ CLNF initialized with PyMTCNN detector")
+    print("   [OK] CLNF initialized with PyMTCNN detector")
 
     # Load test image
     print("\n2. Loading image...")
@@ -28,9 +28,9 @@ def main():
         image = cv2.imread(image_path)
         if image is None:
             raise FileNotFoundError(f"Image not found: {image_path}")
-        print(f"   ✓ Image loaded: {image.shape}")
+        print(f"   [OK] Image loaded: {image.shape}")
     except Exception as e:
-        print(f"\n✗ Error loading image: {e}")
+        print(f"\n[FAILED] Error loading image: {e}")
         print("  Please provide a valid image path in the script")
         sys.exit(1)
 
@@ -39,7 +39,7 @@ def main():
     try:
         landmarks_68, info = clnf.detect_and_fit(image)
 
-        print(f"\n   ✓ Success!")
+        print(f"\n   [OK] Success!")
         print(f"     Detected 68 landmarks")
         print(f"     Converged: {info['converged']}")
         print(f"     Iterations: {info['iterations']}")
@@ -62,7 +62,7 @@ def main():
         print(f"\n   Saved: {output_path}")
 
     except ValueError as e:
-        print(f"\n   ✗ Error: {e}")
+        print(f"\n   [FAILED] Error: {e}")
         sys.exit(1)
 
     print("\n" + "=" * 60)

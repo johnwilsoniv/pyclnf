@@ -17,7 +17,7 @@ def main():
     # Initialize CLNF with automatic face detection
     print("\n1. Initializing CLNF...")
     clnf = CLNF()  # Automatically includes PyMTCNN detector
-    print("   ✓ CLNF initialized")
+    print("   [OK] CLNF initialized")
 
     # Load test image
     print("\n2. Loading test image...")
@@ -26,9 +26,9 @@ def main():
         image = cv2.imread(image_path)
         if image is None:
             raise FileNotFoundError(f"Image not found: {image_path}")
-        print(f"   ✓ Image loaded: {image.shape}")
+        print(f"   [OK] Image loaded: {image.shape}")
     except Exception as e:
-        print(f"\n✗ Error: {e}")
+        print(f"\n[FAILED] Error: {e}")
         print("  Please provide a valid image path")
         return
 
@@ -37,7 +37,7 @@ def main():
     try:
         landmarks, info = clnf.detect_and_fit(image)
 
-        print(f"   ✓ Detected {len(landmarks)} landmarks")
+        print(f"   [OK] Detected {len(landmarks)} landmarks")
         print(f"   Converged: {info['converged']}")
         print(f"   Iterations: {info['iterations']}")
         print(f"   Bbox: {info['bbox']}")
@@ -57,10 +57,10 @@ def main():
         # Save visualization
         output_path = "pyclnf_output.jpg"
         cv2.imwrite(output_path, vis)
-        print(f"   ✓ Saved to: {output_path}")
+        print(f"   [OK] Saved to: {output_path}")
 
     except ValueError as e:
-        print(f"\n✗ Error: {e}")
+        print(f"\n[FAILED] Error: {e}")
         return
 
     print("\n" + "=" * 60)
