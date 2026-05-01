@@ -9,8 +9,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
 
 # Find pybind11
+# NOTE: pybind11 3.x's `python -m pybind11 --cmakedir` returns the path wrapped
+# in literal Python repr quotes (e.g. "'/path/to/cmake'"), which breaks CMake's
+# OUTPUT_VARIABLE capture. Use `pybind11.get_cmake_dir()` instead — clean string.
 execute_process(
-    COMMAND ${Python3_EXECUTABLE} -m pybind11 --cmakedir
+    COMMAND ${Python3_EXECUTABLE} -c "import pybind11; print(pybind11.get_cmake_dir())"
     OUTPUT_VARIABLE pybind11_DIR
     OUTPUT_STRIP_TRAILING_WHITESPACE
 )
