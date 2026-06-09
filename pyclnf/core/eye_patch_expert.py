@@ -947,7 +947,12 @@ class HierarchicalEyeModel:
                 # Compute response - debug center pixel only
                 debug_file = None
                 if debug_enabled and i == 1 and j == 1:  # Center pixel of 3x3
-                    debug_file = f'/tmp/python_ccnf_neuron_debug_call{debug_call}.txt'
+                    # Use tempfile so this works on Windows too (was hardcoded /tmp/).
+                    import os as _os, tempfile as _tempfile
+                    debug_file = _os.path.join(
+                        _tempfile.gettempdir(),
+                        f'python_ccnf_neuron_debug_call{debug_call}.txt',
+                    )
                     self._ccnf_debug_call = debug_call + 1
 
                 # Keep as float32 like C++ - don't convert to uint8 which loses fractional precision
