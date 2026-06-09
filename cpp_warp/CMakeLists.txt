@@ -16,9 +16,28 @@ execute_process(
 )
 find_package(pybind11 REQUIRED)
 
-# Find OpenCV from Homebrew
-# This is the key - we want the EXACT same OpenCV that C++ OpenFace uses
-set(OpenCV_DIR "/opt/homebrew/opt/opencv/lib/cmake/opencv4")
+# Find OpenCV. We pin to the same OpenCV C++ OpenFace uses so cv::warpAffine
+# is bit-exact across platforms.
+#  - macOS: Homebrew OpenCV 4.12 at the canonical path
+#  - Windows: pre-built OpenCV 4.12 pointed at via OPENCV_DIR env var (set it
+#    to the install root, e.g. C:/Users/User/Documents/opencv -- so the
+#    "build/" subdirectory containing OpenCVConfig.cmake is at
+#    "$ENV{OPENCV_DIR}/build")
+#  - Linux: relies on the system OpenCV package (find_package picks it up)
+if(WIN32)
+    if(DEFINED ENV{OPENCV_DIR})
+        set(OpenCV_DIR "$ENV{OPENCV_DIR}/build")
+        message(STATUS "Using Windows OpenCV from OPENCV_DIR: ${OpenCV_DIR}")
+    else()
+        message(FATAL_ERROR
+            "OPENCV_DIR env var must point at the OpenCV 4.12 install root on Windows "
+            "(the directory containing build/OpenCVConfig.cmake). Download the pre-built "
+            "release from https://github.com/opencv/opencv/releases/tag/4.12.0 and set "
+            "OPENCV_DIR accordingly before invoking cmake.")
+    endif()
+elseif(APPLE)
+    set(OpenCV_DIR "/opt/homebrew/opt/opencv/lib/cmake/opencv4")
+endif()
 find_package(OpenCV REQUIRED COMPONENTS core imgproc)
 
 message(STATUS "OpenCV version: ${OpenCV_VERSION}")
