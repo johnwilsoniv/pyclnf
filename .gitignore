@@ -93,7 +93,16 @@ celerybeat.pid
 # Documentation
 docs/_build/
 
-# Large model files - downloaded on first use from GitHub releases
-pyclnf/models/patch_experts/*.dat
-
-# Eye models are now included in the package (tracked with LFS)
+# OpenFace model files are never committed (OpenFace's license does not allow
+# redistribution). Users download them from OpenFace: see README.
+*.dat
+*.npy
+*.npz
+*.onnx
+*.mlmodel
+*.mlpackage/
+*.pt
+*.pth
+pyclnf/models/*
+!pyclnf/models/*.py
+!pyclnf/models/openface_models.json
