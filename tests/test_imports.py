@@ -66,3 +66,22 @@ def test_user_modules_named_models_and_core_are_not_shadowed(tmp_path):
     r = subprocess.run([sys.executable, "-c", code], cwd=tmp_path, env=env,
                        capture_output=True, text=True, timeout=300)
     assert r.returncode == 0 and r.stdout.strip().endswith("ok"), r.stdout + r.stderr
+
+
+def test_imports_without_optional_torch(tmp_path):
+    """torch is optional (GPU path); pyclnf and its download command must import without it."""
+    pytest.importorskip("numpy")
+    pytest.importorskip("cv2")
+    pytest.importorskip("numba")
+    code = textwrap.dedent("""
+        import sys
+        sys.modules["torch"] = None              # behave as if torch were not installed
+        import pyclnf, pyclnf.download_models
+        from pyclnf import CLNF
+        from pyclnf.models import ensure_models
+        print("ok")
+    """)
+    env = dict(os.environ, PYTHONPATH=str(REPO))
+    r = subprocess.run([sys.executable, "-c", code], cwd=tmp_path, env=env,
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0 and r.stdout.strip().endswith("ok"), r.stdout + r.stderr

@@ -394,7 +394,7 @@ class BatchedCEN:
 
         return output
 
-    def _get_reorder_indices(self, y_blocks: int, x_blocks: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _get_reorder_indices(self, y_blocks: int, x_blocks: int) -> 'Tuple[torch.Tensor, torch.Tensor]':
         """Get cached reorder indices for unfold -> column-major conversion."""
         cache_key = (y_blocks, x_blocks, self.height_support)
 
