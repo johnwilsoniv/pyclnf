@@ -1,0 +1,145 @@
+{
+  "schema": 1,
+  "openface_version": "2.2.0",
+  "source": "OpenFace 2.2.0 (github.com/TadasBaltrusaitis/OpenFace, tag OpenFace_2.2.0)",
+  "license": "OpenFace license: academic or non-profit noncommercial research use only",
+  "license_url": "https://github.com/TadasBaltrusaitis/OpenFace/blob/master/OpenFace-license.txt",
+  "note": "pyclnf does not include these files. They are downloaded from OpenFace's official sources, checked against these SHA-256 values, and stored in the shared cache under originals/<path>. Files in OpenFace's git repository come from the OpenFace_2.2.0 tag; the four CEN files are not in git and come from the links in OpenFace's download_models.ps1/.sh at that tag (Dropbox, then OneDrive). pyclnf converts them into derived/pyclnf/<converter version>/.",
+  "files": [
+    {
+      "path": "lib/local/LandmarkDetector/model/pdms/In-the-wild_aligned_PDM_68.txt",
+      "urls": [
+        "https://raw.githubusercontent.com/TadasBaltrusaitis/OpenFace/OpenFace_2.2.0/lib/local/LandmarkDetector/model/pdms/In-the-wild_aligned_PDM_68.txt",
+        "https://github.com/TadasBaltrusaitis/OpenFace/raw/OpenFace_2.2.0/lib/local/LandmarkDetector/model/pdms/In-the-wild_aligned_PDM_68.txt"
+      ],
+      "sha256": "b9eafb292b18505b55cdbc5d8ba45413709cd300cf3e7e8d1946cd0f5c5b94b1",
+      "size": 69023
+    },
+    {
+      "path": "lib/local/LandmarkDetector/model/patch_experts/ccnf_patches_0.25_general.txt",
+      "urls": [
+        "https://raw.githubusercontent.com/TadasBaltrusaitis/OpenFace/OpenFace_2.2.0/lib/local/LandmarkDetector/model/patch_experts/ccnf_patches_0.25_general.txt",
+        "https://github.com/TadasBaltrusaitis/OpenFace/raw/OpenFace_2.2.0/lib/local/LandmarkDetector/model/patch_experts/ccnf_patches_0.25_general.txt"
+      ],
+      "sha256": "18f4a62387a9cadcb49177db5f8726d73f3d4675bed60cb965e8256590553a48",
+      "size": 2429528
+    },
+    {
+      "path": "lib/local/LandmarkDetector/model/model_eye/pdms/pdm_28_l_eye_3D_closed.txt",
+      "urls": [
+        "https://raw.githubusercontent.com/TadasBaltrusaitis/OpenFace/OpenFace_2.2.0/lib/local/LandmarkDetector/model/model_eye/pdms/pdm_28_l_eye_3D_closed.txt",
+        "https://github.com/TadasBaltrusaitis/OpenFace/raw/OpenFace_2.2.0/lib/local/LandmarkDetector/model/model_eye/pdms/pdm_28_l_eye_3D_closed.txt"
+      ],
+      "sha256": "eaf275c1286d5e03ea695b8250bffcef95084bf67598dfc9f03121d16b9b713f",
+      "size": 9304
+    },
+    {
+      "path": "lib/local/LandmarkDetector/model/model_eye/pdms/pdm_28_eye_3D_closed.txt",
+      "urls": [
+        "https://raw.githubusercontent.com/TadasBaltrusaitis/OpenFace/OpenFace_2.2.0/lib/local/LandmarkDetector/model/model_eye/pdms/pdm_28_eye_3D_closed.txt",
+        "https://github.com/TadasBaltrusaitis/OpenFace/raw/OpenFace_2.2.0/lib/local/LandmarkDetector/model/model_eye/pdms/pdm_28_eye_3D_closed.txt"
+      ],
+      "sha256": "8034805a0de072dafd0f6daecd71ee3f44292bc860bff6425725feac63e045f2",
+      "size": 9318
+    },
+    {
+      "path": "lib/local/LandmarkDetector/model/model_eye/patch_experts/left_ccnf_patches_1.00_synth_lid_.txt",
+      "urls": [
+        "https://raw.githubusercontent.com/TadasBaltrusaitis/OpenFace/OpenFace_2.2.0/lib/local/LandmarkDetector/model/model_eye/patch_experts/left_ccnf_patches_1.00_synth_lid_.txt",
+        "https://github.com/TadasBaltrusaitis/OpenFace/raw/OpenFace_2.2.0/lib/local/LandmarkDetector/model/model_eye/patch_experts/left_ccnf_patches_1.00_synth_lid_.txt"
+      ],
+      "sha256": "8fe3229cda73dc49fcc27635fb875941e4d28b342c0f9f49bbcfc8ab9711cc07",
+      "size": 104384
+    },
+    {
+      "path": "lib/local/LandmarkDetector/model/model_eye/patch_experts/left_ccnf_patches_1.50_synth_lid_.txt",
+      "urls": [
+        "https://raw.githubusercontent.com/TadasBaltrusaitis/OpenFace/OpenFace_2.2.0/lib/local/LandmarkDetector/model/model_eye/patch_experts/left_ccnf_patches_1.50_synth_lid_.txt",
+        "https://github.com/TadasBaltrusaitis/OpenFace/raw/OpenFace_2.2.0/lib/local/LandmarkDetector/model/model_eye/patch_experts/left_ccnf_patches_1.50_synth_lid_.txt"
+      ],
+      "sha256": "1c728e667b3e00ce5feb4eb8a5f68c174af5bb1f80b7ee8d3d01df6023917581",
+      "size": 104384
+    },
+    {
+      "path": "lib/local/LandmarkDetector/model/model_eye/patch_experts/ccnf_patches_1.00_synth_lid_.txt",
+      "urls": [
+        "https://raw.githubusercontent.com/TadasBaltrusaitis/OpenFace/OpenFace_2.2.0/lib/local/LandmarkDetector/model/model_eye/patch_experts/ccnf_patches_1.00_synth_lid_.txt",
+        "https://github.com/TadasBaltrusaitis/OpenFace/raw/OpenFace_2.2.0/lib/local/LandmarkDetector/model/model_eye/patch_experts/ccnf_patches_1.00_synth_lid_.txt"
+      ],
+      "sha256": "bc5f628dbcd0f24eabe5e2b7f2a6995c513ebb93ab63b03449c5f5f05a777939",
+      "size": 104368
+    },
+    {
+      "path": "lib/local/LandmarkDetector/model/model_eye/patch_experts/ccnf_patches_1.50_synth_lid_.txt",
+      "urls": [
+        "https://raw.githubusercontent.com/TadasBaltrusaitis/OpenFace/OpenFace_2.2.0/lib/local/LandmarkDetector/model/model_eye/patch_experts/ccnf_patches_1.50_synth_lid_.txt",
+        "https://github.com/TadasBaltrusaitis/OpenFace/raw/OpenFace_2.2.0/lib/local/LandmarkDetector/model/model_eye/patch_experts/ccnf_patches_1.50_synth_lid_.txt"
+      ],
+      "sha256": "601a74b91930c2648676615278b959eb67f860e9757b169ee59bd41ac994cb9b",
+      "size": 104368
+    },
+    {
+      "path": "lib/local/LandmarkDetector/model/model_inner/pdms/pdm_51_inner.txt",
+      "urls": [
+        "https://raw.githubusercontent.com/TadasBaltrusaitis/OpenFace/OpenFace_2.2.0/lib/local/LandmarkDetector/model/model_inner/pdms/pdm_51_inner.txt",
+        "https://github.com/TadasBaltrusaitis/OpenFace/raw/OpenFace_2.2.0/lib/local/LandmarkDetector/model/model_inner/pdms/pdm_51_inner.txt"
+      ],
+      "sha256": "28412e9dda64e95a5fab618ecda2b5dc1802187da4894d27965715ab361cb2f7",
+      "size": 48934
+    },
+    {
+      "path": "lib/local/LandmarkDetector/model/model_inner/patch_experts/ccnf_patches_1.00_inner.txt",
+      "urls": [
+        "https://raw.githubusercontent.com/TadasBaltrusaitis/OpenFace/OpenFace_2.2.0/lib/local/LandmarkDetector/model/model_inner/patch_experts/ccnf_patches_1.00_inner.txt",
+        "https://github.com/TadasBaltrusaitis/OpenFace/raw/OpenFace_2.2.0/lib/local/LandmarkDetector/model/model_inner/patch_experts/ccnf_patches_1.00_inner.txt"
+      ],
+      "sha256": "79eb8ab716abe420a1604c8db8c107e0b9774bedfd91f595875e6bad0d37156c",
+      "size": 2043100
+    },
+    {
+      "path": "lib/local/LandmarkDetector/model/detection_validation/validator_cnn_68.txt",
+      "urls": [
+        "https://raw.githubusercontent.com/TadasBaltrusaitis/OpenFace/OpenFace_2.2.0/lib/local/LandmarkDetector/model/detection_validation/validator_cnn_68.txt",
+        "https://github.com/TadasBaltrusaitis/OpenFace/raw/OpenFace_2.2.0/lib/local/LandmarkDetector/model/detection_validation/validator_cnn_68.txt"
+      ],
+      "sha256": "3e422e6bf1659dfd83231e988328635e62eb0c4f9ae6b3979052ebc7ee4b287a",
+      "size": 2328608
+    },
+    {
+      "path": "lib/local/LandmarkDetector/model/patch_experts/cen_patches_0.25_of.dat",
+      "urls": [
+        "https://www.dropbox.com/s/7na5qsjzz8yfoer/cen_patches_0.25_of.dat?dl=1",
+        "https://onedrive.live.com/download?cid=2E2ADA578BFF6E6E&resid=2E2ADA578BFF6E6E%2153072&authkey=AKqoZtcN0PSIZH4"
+      ],
+      "sha256": "99d3df9888115428075de7b8f1bc86176881de640c2fdf47e2ab0cee556661bf",
+      "size": 60602360
+    },
+    {
+      "path": "lib/local/LandmarkDetector/model/patch_experts/cen_patches_0.35_of.dat",
+      "urls": [
+        "https://www.dropbox.com/s/k7bj804cyiu474t/cen_patches_0.35_of.dat?dl=1",
+        "https://onedrive.live.com/download?cid=2E2ADA578BFF6E6E&resid=2E2ADA578BFF6E6E%2153079&authkey=ANpDR1n3ckL_0gs"
+      ],
+      "sha256": "1070bff51b077ee6a18ce8e1ebbc6f568e1a7a469f6911a8263413878b3df469",
+      "size": 60602360
+    },
+    {
+      "path": "lib/local/LandmarkDetector/model/patch_experts/cen_patches_0.50_of.dat",
+      "urls": [
+        "https://www.dropbox.com/s/ixt4vkbmxgab1iu/cen_patches_0.50_of.dat?dl=1",
+        "https://onedrive.live.com/download?cid=2E2ADA578BFF6E6E&resid=2E2ADA578BFF6E6E%2153074&authkey=AGi-e30AfRc_zvs"
+      ],
+      "sha256": "3f08124067e326e83e3261a55c79493e745b01138c9c1b59713dd9b17424168e",
+      "size": 154289792
+    },
+    {
+      "path": "lib/local/LandmarkDetector/model/patch_experts/cen_patches_1.00_of.dat",
+      "urls": [
+        "https://www.dropbox.com/s/2t5t1sdpshzfhpj/cen_patches_1.00_of.dat?dl=1",
+        "https://onedrive.live.com/download?cid=2E2ADA578BFF6E6E&resid=2E2ADA578BFF6E6E%2153070&authkey=AD6KjtYipphwBPc"
+      ],
+      "sha256": "bed961bbfa2cc41a709d44c1d1d8a92b2537bc46f2fd6ab430c137fedd0e21b0",
+      "size": 154289792
+    }
+  ]
+}

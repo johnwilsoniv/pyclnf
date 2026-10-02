@@ -51,6 +51,8 @@ def test_user_modules_named_models_and_core_are_not_shadowed(tmp_path):
         import models, core                      # the user's own modules, imported first
         import pyclnf
         import pyclnf.core.patch_expert          # 0.3.4 imported "models.openface_loader" here
+        import pyclnf.models, pyclnf.download_models
+        from pyclnf.models import ensure_models
         from pyclnf.models.openface_loader import load_sigma_components
         assert models.SENTINEL == "user models", models
         assert core.SENTINEL == "user core", core

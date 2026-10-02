@@ -49,6 +49,9 @@ dev = [
     "flake8>=4.0.0",
 ]
 
+[project.scripts]
+pyclnf-download-models = "pyclnf.download_models:main"
+
 [project.urls]
 Homepage = "https://github.com/johnwilsoniv/pyclnf"
 Repository = "https://github.com/johnwilsoniv/pyclnf"
@@ -59,11 +62,13 @@ packages = ["pyclnf", "pyclnf.core", "pyclnf.utils", "pyclnf.models", "pyclnf.cp
 
 [tool.setuptools.package-data]
 pyclnf = [
-    "models/**/*.npz",
-    "models/**/*.npy",
-    "models/**/*.dat",
+    "models/openface_models.json",
     "cpp_warp/*.so",
 ]
+
+# OpenFace's model files are never packaged: users download them from OpenFace.
+[tool.setuptools.exclude-package-data]
+"*" = ["*.npz", "*.npy", "*.dat", "*.onnx", "*.mlmodel", "*.pt", "*.pth"]
 
 [tool.black]
 line-length = 100

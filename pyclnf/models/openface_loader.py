@@ -135,27 +135,34 @@ class PDMLoader:
 class CCNFPatchExpertLoader:
     """Load and parse OpenFace CCNF patch experts from binary file."""
 
-    def __init__(self, model_path: str, num_landmarks: int = 68):
+    def __init__(self, model_path: str, num_landmarks: int = 68, verbose: bool = True):
         """
         Load CCNF patch experts from OpenFace binary format.
 
         Args:
             model_path: Path to CCNF .txt file (e.g., ccnf_patches_0.25_general.txt)
             num_landmarks: Number of landmarks (default: 68)
+            verbose: Print loading/export progress (default: True)
         """
         self.model_path = Path(model_path)
         self.num_landmarks = num_landmarks
+        self.verbose = verbose
 
         # Multi-view structure
         self.patch_scaling = None
         self.num_views = 0
         self.centers = []  # List of (3, 1) arrays - [pitch, yaw, roll] per view
+        self.raw_centers = []  # Same, exactly as stored in the file (before the conversion below)
         self.visibilities = []  # List of (num_landmarks, 1) arrays - 0/1 per landmark per view
         self.window_sizes = []  # List of window sizes for edge features
         self.sigma_components = []  # List of lists of sigma matrices
         self.patches = []  # List of lists: patches[view_idx][landmark_idx]
 
         self._load()
+
+    def _log(self, *args, **kwargs):
+        if self.verbose:
+            print(*args, **kwargs)
 
     def _read_int32(self, f) -> int:
         """Read 4-byte integer (little-endian)."""
@@ -286,38 +293,39 @@ class CCNFPatchExpertLoader:
 
     def _load(self):
         """Load CCNF patch experts from binary file with multi-view structure."""
-        print(f"Loading CCNF patch experts from {self.model_path}")
+        self._log(f"Loading CCNF patch experts from {self.model_path}")
 
         with open(self.model_path, 'rb') as f:
             # Read file header
             self.patch_scaling = self._read_float64(f)
             self.num_views = self._read_int32(f)
 
-            print(f"  Patch scaling: {self.patch_scaling}")
-            print(f"  Number of views: {self.num_views}")
+            self._log(f"  Patch scaling: {self.patch_scaling}")
+            self._log(f"  Number of views: {self.num_views}")
 
             # Read view centers (pitch, yaw, roll for each view)
-            print(f"\n  Reading {self.num_views} view centers...")
+            self._log(f"\n  Reading {self.num_views} view centers...")
             for view_idx in range(self.num_views):
                 center = self._read_matrix_bin(f)  # Should be (3, 1)
+                self.raw_centers.append(center)
                 # Convert from radians to degrees as per C++ code
                 center_deg = center * 180.0 / np.pi
                 self.centers.append(center_deg)
-                print(f"    View {view_idx}: pitch={center_deg[0,0]:.1f}°, "
+                self._log(f"    View {view_idx}: pitch={center_deg[0,0]:.1f}°, "
                       f"yaw={center_deg[1,0]:.1f}°, roll={center_deg[2,0]:.1f}°")
 
             # Read visibility matrices (which landmarks are visible in each view)
-            print(f"\n  Reading {self.num_views} visibility matrices...")
+            self._log(f"\n  Reading {self.num_views} visibility matrices...")
             for view_idx in range(self.num_views):
                 visibility = self._read_matrix_bin(f)  # Should be (num_landmarks, 1)
                 self.visibilities.append(visibility)
                 num_visible = np.sum(visibility)
-                print(f"    View {view_idx}: {num_visible}/{self.num_landmarks} landmarks visible")
+                self._log(f"    View {view_idx}: {num_visible}/{self.num_landmarks} landmarks visible")
 
             # Read window sizes and sigma components (for edge features)
-            print(f"\n  Reading window sizes and sigma components...")
+            self._log(f"\n  Reading window sizes and sigma components...")
             num_win_sizes = self._read_int32(f)
-            print(f"    Number of window sizes: {num_win_sizes}")
+            self._log(f"    Number of window sizes: {num_win_sizes}")
 
             for w in range(num_win_sizes):
                 window_size = self._read_int32(f)
@@ -330,13 +338,13 @@ class CCNFPatchExpertLoader:
                     sigmas_for_window.append(sigma_mat)
 
                 self.sigma_components.append(sigmas_for_window)
-                print(f"    Window size {window_size}: {num_sigma_comp} sigma components")
+                self._log(f"    Window size {window_size}: {num_sigma_comp} sigma components")
 
             # Read patch experts for each view and landmark
-            print(f"\n  Reading patch experts...")
+            self._log(f"\n  Reading patch experts...")
             for view_idx in range(self.num_views):
                 view_patches = []
-                print(f"\n  View {view_idx}:")
+                self._log(f"\n  View {view_idx}:")
 
                 for landmark_idx in range(self.num_landmarks):
                     try:
@@ -361,51 +369,52 @@ class CCNFPatchExpertLoader:
                         view_patches.append(patch)
 
                         if not patch['empty'] and landmark_idx % 10 == 0:
-                            print(f"    Landmark {landmark_idx:02d}: {len(patch['neurons'])} neurons, "
+                            self._log(f"    Landmark {landmark_idx:02d}: {len(patch['neurons'])} neurons, "
                                   f"{patch['width']}x{patch['height']} patch, "
                                   f"confidence={patch['patch_confidence']:.4f}")
 
                     except struct.error as e:
-                        print(f"    Error reading landmark {landmark_idx} in view {view_idx}: {e}")
+                        self._log(f"    Error reading landmark {landmark_idx} in view {view_idx}: {e}")
                         raise
                     except Exception as e:
-                        print(f"    Error reading landmark {landmark_idx} in view {view_idx}: {e}")
+                        self._log(f"    Error reading landmark {landmark_idx} in view {view_idx}: {e}")
                         raise
 
                 self.patches.append(view_patches)
 
-        print(f"\nLoaded {len(self.patches)} views with {self.num_landmarks} patch experts each")
+        self._log(f"\nLoaded {len(self.patches)} views with {self.num_landmarks} patch experts each")
 
     def save_numpy(self, output_dir: str):
         """Export patch experts to NumPy format with multi-view structure."""
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
-        print(f"\nExporting CCNF patches to {output_path}")
+        self._log(f"\nExporting CCNF patches to {output_path}")
 
         # Save global metadata
         global_meta = output_path / 'global_metadata.npz'
         np.savez(
             global_meta,
-            patch_scaling=self.patch_scaling,
-            num_views=self.num_views,
-            num_landmarks=self.num_landmarks,
-            window_sizes=np.array(self.window_sizes)
+            patch_scaling=np.float64(self.patch_scaling),
+            num_views=np.int64(self.num_views),
+            num_landmarks=np.int64(self.num_landmarks),
+            window_sizes=np.array(self.window_sizes, dtype=np.int64)
         )
-        print(f"  Saved global metadata: {self.num_views} views, {self.num_landmarks} landmarks")
+        self._log(f"  Saved global metadata: {self.num_views} views, {self.num_landmarks} landmarks")
 
         # Save sigma components for each window size
-        print(f"  Saving {len(self.window_sizes)} window size sigma components...")
+        self._log(f"  Saving {len(self.window_sizes)} window size sigma components...")
         for w_idx, window_size in enumerate(self.window_sizes):
+            sigmas_for_window = self.sigma_components[w_idx]
+            if not sigmas_for_window:
+                continue  # e.g. eye models: window sizes without sigma components
             sigma_dir = output_path / f'sigmas_window_{window_size}'
             sigma_dir.mkdir(exist_ok=True)
-
-            sigmas_for_window = self.sigma_components[w_idx]
             for s_idx, sigma_mat in enumerate(sigmas_for_window):
                 sigma_file = sigma_dir / f'sigma_{s_idx:02d}.npy'
                 np.save(sigma_file, sigma_mat.astype(np.float32))
 
-            print(f"    Window {window_size}: Saved {len(sigmas_for_window)} sigma matrices")
+            self._log(f"    Window {window_size}: Saved {len(sigmas_for_window)} sigma matrices")
 
         # Save view centers and visibilities
         for view_idx in range(self.num_views):
@@ -437,10 +446,10 @@ class CCNFPatchExpertLoader:
                 metadata_file = patch_dir / 'metadata.npz'
                 np.savez(
                     metadata_file,
-                    width=patch['width'],
-                    height=patch['height'],
-                    betas=np.array(patch['betas']),
-                    patch_confidence=patch['patch_confidence']
+                    width=np.int64(patch['width']),
+                    height=np.int64(patch['height']),
+                    betas=np.array(patch['betas'], dtype=np.float64),
+                    patch_confidence=np.float64(patch['patch_confidence'])
                 )
 
                 # Save neurons
@@ -448,16 +457,16 @@ class CCNFPatchExpertLoader:
                     neuron_file = patch_dir / f'neuron_{j:02d}.npz'
                     np.savez(
                         neuron_file,
-                        neuron_type=neuron['neuron_type'],
-                        norm_weights=neuron['norm_weights'],
-                        bias=neuron['bias'],
-                        alpha=neuron['alpha'],
+                        neuron_type=np.int64(neuron['neuron_type']),
+                        norm_weights=np.float64(neuron['norm_weights']),
+                        bias=np.float64(neuron['bias']),
+                        alpha=np.float64(neuron['alpha']),
                         weights=neuron['weights']
                     )
 
-            print(f"  View {view_idx}: Exported {non_empty_count}/{self.num_landmarks} non-empty patches")
+            self._log(f"  View {view_idx}: Exported {non_empty_count}/{self.num_landmarks} non-empty patches")
 
-        print(f"\n[OK] Export complete: {self.num_views} views × {self.num_landmarks} patches")
+        self._log(f"\n[OK] Export complete: {self.num_views} views × {self.num_landmarks} patches")
 
     def get_info(self) -> Dict[str, Any]:
         """Get patch expert collection information for multi-view structure."""

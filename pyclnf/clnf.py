@@ -48,9 +48,6 @@ class CLNF:
     patch experts and constrained optimization.
     """
 
-    # Default to package-relative models directory
-    _DEFAULT_MODEL_DIR = Path(__file__).parent / "models"
-
     def __init__(self,
                  model_dir: str = None,
                  scale: float = 0.25,
@@ -81,7 +78,11 @@ class CLNF:
         Initialize CLNF model.
 
         Args:
-            model_dir: Directory containing exported PDM and CCNF models
+            model_dir: Model directory. Default (None): OpenFace's model files, prepared
+                      once by pyclnf.models.ensure_models() (run `pyclnf-download-models`
+                      the first time). Nothing is downloaded unless the OpenFace license
+                      was accepted; otherwise ModelsNotInstalledError explains how to
+                      install the files.
             scale: DEPRECATED - now loads all scales [0.25, 0.35, 0.5]
             regularization: Shape regularization weight (higher = stricter shape prior)
                           Default: 22.5 (C++ CECLM: 25.0 base × 0.9 scaling)
@@ -118,7 +119,11 @@ class CLNF:
         """
         self.use_shared_memory = use_shared_memory
         self.shared_memory_dir = shared_memory_dir
-        self.model_dir = Path(model_dir) if model_dir else self._DEFAULT_MODEL_DIR
+        if model_dir:
+            self.model_dir = Path(model_dir)
+        else:
+            from .models import ensure_models
+            self.model_dir = ensure_models(accept_license=False)
         self.regularization = regularization
         self.sigma = sigma
         self.weight_multiplier = weight_multiplier
@@ -1394,7 +1399,6 @@ def test_clnf():
     # Test 1: Initialize CLNF
     print("\nTest 1: Initialize CLNF")
     clnf = CLNF(
-        model_dir="pyclnf/models",
         scale=0.25,
         max_iterations=5
     )

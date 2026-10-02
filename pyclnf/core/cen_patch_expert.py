@@ -550,7 +550,7 @@ class CENPatchExperts:
             if not scale_file.exists():
                 raise FileNotFoundError(
                     f"CEN model not found: {scale_file}\n"
-                    "Run: python -m pyclnf.model_downloader"
+                    "Install OpenFace's model files with: pyclnf-download-models"
                 )
 
             print(f"  [{idx+1}/4] Loading scale {scale}...")
@@ -564,7 +564,7 @@ class CENPatchExperts:
             print(f"      [OK] {len(experts_at_scale)} patch experts loaded")
 
     def _ensure_models_exist(self):
-        """Check if model files exist, attempt download if not."""
+        """Check that OpenFace's CEN patch expert files are in model_dir."""
         # Check for any scale file
         for scale in self.patch_scaling:
             scale_file = self.model_dir / f"cen_patches_{scale:.2f}_of.dat"
@@ -574,17 +574,15 @@ class CENPatchExperts:
             if scale_file.exists():
                 return  # At least one file exists in patch_experts subdir
 
-        # No models found - try to download
-        print("CEN patch expert models not found. Attempting download...")
-        try:
-            from ..model_downloader import download_models
-            if not download_models():
-                print("Model download failed. Please download manually from:")
-                print("  https://github.com/johnwilsoniv/pyclnf/releases")
-        except Exception as e:
-            print(f"Could not download models: {e}")
-            print("Please download manually from:")
-            print("  https://github.com/johnwilsoniv/pyclnf/releases")
+        # pyclnf does not ship or download these files on its own: OpenFace's license
+        # requires each user to obtain them from OpenFace (see pyclnf.models).
+        from ..models import ModelsNotInstalledError
+        raise ModelsNotInstalledError(
+            f"OpenFace's CEN patch expert files (cen_patches_*.dat) are not in {self.model_dir}.\n"
+            "Install OpenFace's model files with:  pyclnf-download-models\n"
+            "then create CLNF() without model_dir (or pass the folder that "
+            "pyclnf.models.ensure_models() returns)."
+        )
 
     def _load_scale(self, dat_file):
         """

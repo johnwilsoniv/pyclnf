@@ -2,14 +2,16 @@
 PyCLNF - Pure Python CLNF (Constrained Local Neural Fields) implementation
 
 A pure Python implementation of OpenFace's CLNF facial landmark detector.
-Uses exported OpenFace models with no C++ dependencies, making it perfect
-for PyInstaller distribution and cross-platform deployment.
+
+OpenFace's model files are not included: run `pyclnf-download-models` once (or
+call pyclnf.models.ensure_models(accept_license=True)) to download them from
+OpenFace's official sources and prepare them on this computer.
 
 Usage:
     from pyclnf import CLNF
 
-    # Initialize model
-    clnf = CLNF(model_dir="pyclnf/models")
+    # Initialize model (uses the installed OpenFace model files)
+    clnf = CLNF()
 
     # Detect landmarks
     landmarks, info = clnf.fit(image, face_bbox)
