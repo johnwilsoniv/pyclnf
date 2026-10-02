@@ -348,9 +348,6 @@ def convert_all_patch_experts(model_dir: str, scale: float = 0.25):
 
 def benchmark_coreml():
     """Benchmark CoreML vs Numba patch expert inference."""
-    import sys
-    sys.path.insert(0, 'pyclnf')
-
     from pyclnf.core.patch_expert import CCNFPatchExpert
 
     patch_dir = "pyclnf/pyclnf/models/exported_ccnf_0.25/view_00/patch_30"

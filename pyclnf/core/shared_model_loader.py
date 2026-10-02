@@ -438,13 +438,7 @@ class SharedAUModelManager:
 
             print(f"[SharedAUModelManager] Initializing shared AU models at {shm_dir}...")
 
-            # Import the regular AU model parser
-            import sys
-            # Add pyfaceau to path if needed
-            pyfaceau_path = Path(au_models_dir).parent.parent
-            if str(pyfaceau_path) not in sys.path:
-                sys.path.insert(0, str(pyfaceau_path))
-
+            # Import the regular AU model parser (pyfaceau must be installed)
             from pyfaceau.prediction.model_parser import OF22ModelParser
 
             # Load models using regular parser
@@ -594,10 +588,6 @@ def get_au_models(au_models_dir: str, shm_dir: Optional[str] = None,
         Dict-like object mapping AU names to model dicts
     """
     if not use_shared:
-        import sys
-        pyfaceau_path = Path(au_models_dir).parent.parent
-        if str(pyfaceau_path) not in sys.path:
-            sys.path.insert(0, str(pyfaceau_path))
         from pyfaceau.prediction.model_parser import OF22ModelParser
         parser = OF22ModelParser(au_models_dir)
         return parser.load_all_models(use_recommended=True, use_combined=True)

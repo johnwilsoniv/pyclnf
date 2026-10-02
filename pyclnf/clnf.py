@@ -255,8 +255,6 @@ class CLNF:
         if detector == "pymtcnn":
             # Use PyMTCNN detector (default for production)
             try:
-                import sys
-                sys.path.insert(0, str(Path(__file__).parent.parent / "pymtcnn"))
                 from pymtcnn import MTCNN
                 self.detector = MTCNN()
                 print("[OK] PyMTCNN detector initialized (CoreML/ONNX auto-selection)")

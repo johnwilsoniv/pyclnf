@@ -307,8 +307,6 @@ def test_metal_backend():
         print("Metal backend not available")
         return
 
-    import sys
-    sys.path.insert(0, 'pyclnf')
     from pyclnf.core.patch_expert import CCNFModel
 
     print("\n=== Testing Metal Backend ===\n")

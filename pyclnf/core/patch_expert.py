@@ -22,9 +22,7 @@ import numpy as np
 from pathlib import Path
 from typing import Tuple, Optional, List, Dict
 import cv2
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from models.openface_loader import load_sigma_components
+from ..models.openface_loader import load_sigma_components
 
 
 class CCNFPatchExpert:
