@@ -8,6 +8,15 @@ Pure Python implementation of OpenFace's CLNF (Constrained Local Neural Fields) 
 pip install pyclnf
 ```
 
+pip also installs what pyclnf needs, including OpenCV 4. pyclnf stays on OpenCV 4 on purpose:
+OpenCV 5 resamples images slightly differently, which changes the landmarks (see the
+[changelog](https://github.com/johnwilsoniv/pyclnf/blob/main/CHANGELOG.md)).
+
+**Optional: PyTorch for speed.** If [PyTorch](https://pytorch.org/get-started/locally/) is
+installed, pyclnf uses your graphics processor (Apple Silicon or NVIDIA), which is much faster.
+Without PyTorch, pyclnf runs on the processor (CPU). Both work; their landmarks are very close
+but not identical, so use the same setup for all the videos you want to compare.
+
 ## First run: get OpenFace's model files (one time)
 
 pyclnf uses the model files of [OpenFace 2.2.0](https://github.com/TadasBaltrusaitis/OpenFace)
