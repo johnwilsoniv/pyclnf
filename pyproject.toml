@@ -37,7 +37,9 @@ classifiers = [
 ]
 dependencies = [
     "numpy>=1.19.0",
-    "opencv-python>=4.5.0",
+    # OpenCV 5 samples images differently (no 1/32-pixel snapping in warpAffine and remap),
+    # which changes landmarks; stay on OpenCV 4 so results do not depend on the install date.
+    "opencv-python>=4.5.0,<5",
     "numba>=0.56",
     "pymtcnn>=1.0.0",
 ]
