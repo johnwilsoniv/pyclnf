@@ -47,5 +47,10 @@ OpenFace's model files are no longer included in pyclnf.
   landmarks move by 0.006 px on average, 0.07 px at most). The CPU path still warps the image as
   float32, like OpenFace, and no longer converts the whole image for every landmark.
   `NURLMSOptimizer(use_cpp_warp=...)` is accepted and ignored.
+- Fixed: without torch, `CLNF()` and `CLNF(use_gpu=False)` raised `ModuleNotFoundError: torch`,
+  because device detection for `gpu_device='auto'` (the default) imported torch, in the optimizer
+  and in the eye model. torch is now imported only for the GPU path, and `use_gpu=True` without
+  torch warns and uses the CPU path (before, an explicit `gpu_device` kept the GPU path on and
+  `fit` failed with `NameError: torch`).
 - The eye-model debug file uses the system temporary folder.
 - Repository: model files and Git LFS were removed from the history.

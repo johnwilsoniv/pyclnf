@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Optional, List
 import cv2
 
+from .utils import auto_gpu_device
+
 
 def align_shapes_with_scale(source_shape: np.ndarray, destination_shape: np.ndarray) -> np.ndarray:
     """
@@ -455,15 +457,9 @@ class HierarchicalEyeModel:
         self.model_dir = Path(model_dir)
         self.use_gpu = use_gpu
 
-        # Auto-detect GPU device
+        # Auto-detect GPU device (torch is optional: without it the eye model runs on the CPU)
         if gpu_device == 'auto':
-            import torch
-            if torch.backends.mps.is_available():
-                self.gpu_device = 'mps'
-            elif torch.cuda.is_available():
-                self.gpu_device = 'cuda'
-            else:
-                self.gpu_device = 'cpu'
+            self.gpu_device = auto_gpu_device() if use_gpu else 'cpu'
         else:
             self.gpu_device = gpu_device
 

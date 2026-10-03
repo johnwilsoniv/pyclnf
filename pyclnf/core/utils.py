@@ -195,3 +195,16 @@ def extract_aoi(image: np.ndarray, center_x: float, center_y: float,
         (aoi_size, aoi_size),
         flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR
     )
+
+
+def auto_gpu_device() -> str:
+    """Best device torch can use here: 'mps', 'cuda' or 'cpu' ('cpu' if torch is not installed)."""
+    try:
+        import torch
+    except ImportError:
+        return 'cpu'
+    if torch.backends.mps.is_available():
+        return 'mps'
+    if torch.cuda.is_available():
+        return 'cuda'
+    return 'cpu'

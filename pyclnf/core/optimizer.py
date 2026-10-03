@@ -34,15 +34,16 @@ from numba import jit
 import os
 
 from .utils import (align_shapes_with_scale, apply_similarity_transform,
-                    invert_similarity_transform, extract_aoi)
+                    invert_similarity_transform, extract_aoi, auto_gpu_device)
 from .cen_patch_expert import MirroredCENPatchExpert, CENPatchExpert
 
-# Try to import GPU acceleration modules
+# Try to import GPU acceleration modules (they need torch, which is optional)
 try:
-    from .batched_cen import BatchedCEN
+    from .batched_cen import BatchedCEN, TORCH_AVAILABLE
     BATCHED_CEN_AVAILABLE = True
 except ImportError:
     BatchedCEN = None
+    TORCH_AVAILABLE = False
     BATCHED_CEN_AVAILABLE = False
 
 try:
@@ -301,7 +302,7 @@ class NURLMSOptimizer:
                          Kept so existing calls keep working.
             use_gpu: Enable GPU acceleration for response maps and mean-shift computation.
                     Uses BatchedCEN for response maps and GPUMeanShift for mean-shift.
-                    Provides exact numerical match with CPU while being 2-5x faster.
+                    Needs torch; without it the optimizer warns and uses the CPU path.
             gpu_device: GPU device to use: 'mps' (Apple Silicon), 'cuda' (NVIDIA), or 'cpu'.
                        Default 'mps' for Apple Silicon Macs.
         """
@@ -314,24 +315,21 @@ class NURLMSOptimizer:
         self.use_peak_confidence = use_peak_confidence
         self.use_direct_kde = use_direct_kde
 
-        # GPU acceleration setup
-        self.use_gpu = use_gpu and BATCHED_CEN_AVAILABLE and GPU_MEAN_SHIFT_AVAILABLE
+        # GPU acceleration setup (torch is optional: without it the CPU path is used)
+        self.use_gpu = (use_gpu and TORCH_AVAILABLE
+                        and BATCHED_CEN_AVAILABLE and GPU_MEAN_SHIFT_AVAILABLE)
 
-        # Auto-detect best GPU device
+        # Auto-detect best GPU device (only needed, and torch only imported, for the GPU path)
         if gpu_device == 'auto':
-            import torch
-            if torch.backends.mps.is_available():
-                self.gpu_device = 'mps'
-            elif torch.cuda.is_available():
-                self.gpu_device = 'cuda'
-            else:
-                self.gpu_device = 'cpu'
+            self.gpu_device = auto_gpu_device() if self.use_gpu else 'cpu'
         else:
             self.gpu_device = gpu_device
 
         if use_gpu and not self.use_gpu:
             import warnings
             missing = []
+            if not TORCH_AVAILABLE:
+                missing.append("torch")
             if not BATCHED_CEN_AVAILABLE:
                 missing.append("BatchedCEN")
             if not GPU_MEAN_SHIFT_AVAILABLE:
