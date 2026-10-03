@@ -5,10 +5,17 @@ CANONICAL ACCURACY TEST: pyCLNF vs C++ OpenFace
 This is THE reference test for verifying pyCLNF matches C++ OpenFace.
 Run this test instead of writing ad-hoc comparison scripts.
 
+It needs two local recordings and OpenFace's C++ FeatureExtraction binary, which
+are not part of this repository; without them it is skipped. Point it at them with
+environment variables:
+
+    PYCLNF_TEST_VIDEO_DIR        folder with the recordings sample_03.MOV and sample_02.MOV
+    OPENFACE_FEATURE_EXTRACTION  path to OpenFace's FeatureExtraction binary
+
 Usage:
-    python -m pytest pyclnf/tests/test_accuracy_vs_cpp.py -v
+    python -m pytest tests/test_accuracy_vs_cpp.py -v
     # or directly:
-    python pyclnf/tests/test_accuracy_vs_cpp.py
+    python tests/test_accuracy_vs_cpp.py
 
 Expected results:
     - Overall error: < 0.5 px
@@ -27,11 +34,12 @@ import tempfile
 import os
 from pathlib import Path
 
-# Test configuration
-OPENFACE_BIN = '/Users/johnwilsoniv/repo/fea_tool/external_libs/openFace/OpenFace/build/bin/FeatureExtraction'
+# Test configuration (see the module docstring); the test is skipped without these
+VIDEO_DIR = os.environ.get('PYCLNF_TEST_VIDEO_DIR', '')
+OPENFACE_BIN = os.environ.get('OPENFACE_FEATURE_EXTRACTION', '')
 TEST_VIDEOS = [
-    '/Users/johnwilsoniv/Documents/SplitFace Open3/videos/sample_03.MOV',
-    '/Users/johnwilsoniv/Documents/SplitFace Open3/videos/sample_02.MOV',
+    os.path.join(VIDEO_DIR, 'sample_03.MOV'),
+    os.path.join(VIDEO_DIR, 'sample_02.MOV'),
 ]
 
 # Error thresholds (pixels)
@@ -107,7 +115,25 @@ def compute_errors(py_landmarks: np.ndarray, cpp_landmarks: np.ndarray) -> dict:
     return errors
 
 
-def test_single_video(video_path: str) -> dict:
+def missing_data(video_path: str):
+    """Why this comparison cannot run here, or None if everything it needs is available."""
+    if not VIDEO_DIR:
+        return "PYCLNF_TEST_VIDEO_DIR is not set (folder with the test recordings)"
+    if not os.path.isfile(video_path):
+        return f"Video not found: {video_path}"
+    if not OPENFACE_BIN or not os.path.isfile(OPENFACE_BIN):
+        return "OpenFace's FeatureExtraction binary not found (set OPENFACE_FEATURE_EXTRACTION)"
+    try:
+        import pandas  # noqa: F401  (reads the C++ CSV; not a pyclnf dependency)
+    except ImportError:
+        return "pandas is not installed"
+    from pyclnf import models
+    if not models.models_ready():
+        return "OpenFace model files are not installed (run pyclnf-download-models)"
+    return None
+
+
+def compare_single_video(video_path: str) -> dict:
     """Test pyCLNF vs C++ on a single video."""
     video_name = Path(video_path).stem
     print(f"\n{'='*60}")
@@ -172,11 +198,12 @@ def main():
 
     results = []
     for video_path in TEST_VIDEOS:
-        if os.path.exists(video_path):
-            result = test_single_video(video_path)
+        reason = missing_data(video_path)
+        if reason is None:
+            result = compare_single_video(video_path)
             results.append(result)
         else:
-            print(f"\nWARNING: Video not found: {video_path}")
+            print(f"\nWARNING: skipped: {reason}")
 
     # Summary
     print("\n" + "="*60)
@@ -199,20 +226,22 @@ def main():
 def test_accuracy_sample_03():
     """Pytest: Test accuracy on sample_03."""
     video_path = TEST_VIDEOS[0]
-    if not os.path.exists(video_path):
+    reason = missing_data(video_path)
+    if reason is not None:
         import pytest
-        pytest.skip(f"Video not found: {video_path}")
-    result = test_single_video(video_path)
+        pytest.skip(reason)
+    result = compare_single_video(video_path)
     assert result['passed'], f"Accuracy test failed: {result['errors']}"
 
 
 def test_accuracy_sample_02():
     """Pytest: Test accuracy on sample_02."""
     video_path = TEST_VIDEOS[1]
-    if not os.path.exists(video_path):
+    reason = missing_data(video_path)
+    if reason is not None:
         import pytest
-        pytest.skip(f"Video not found: {video_path}")
-    result = test_single_video(video_path)
+        pytest.skip(reason)
+    result = compare_single_video(video_path)
     assert result['passed'], f"Accuracy test failed: {result['errors']}"
 
 
