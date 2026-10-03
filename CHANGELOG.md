@@ -36,7 +36,16 @@ OpenFace's model files are no longer included in pyclnf.
   installed pymtcnn and pyfaceau package folders on `sys.path`.
 - `CCNFPatchExpertLoader` has a `verbose` flag and keeps the view centers as stored in the file
   (`raw_centers`); `save_numpy` writes explicit dtypes and no empty sigma folders.
-- Also since 0.3.4: Windows build support for the `cpp_warp` extension, with a clear
-  `ImportError` when the compiled extension is unavailable; the eye-model debug file uses the
-  system temporary folder.
+- Fixed: the CPU path (`CLNF(use_gpu=False)`, e.g. pyfaceau with `CLNF_CONFIG['use_gpu'] = False`)
+  failed on every frame unless pyclnf's compiled `cpp_warp` extension loaded, which needed
+  Homebrew's OpenCV 4.12 on a Mac with Python 3.10 (the Windows build was never in the wheel). The
+  extension is removed: the CPU path extracts patches with `cv2.warpAffine`, through the same
+  function as the GPU path (`pyclnf.core.utils.extract_aoi`). With the same matrix,
+  `cv2.warpAffine` (OpenCV 4.10 to 4.14) gives exactly the patches `cpp_warp` gave. The matrix is
+  now float32, as in OpenFace's C++ code and the GPU path (cpp_warp used float64), which moves
+  about 0.1% of patch pixels by one 1/32-pixel interpolation step (on OpenFace's sample images,
+  landmarks move by 0.006 px on average, 0.07 px at most). The CPU path still warps the image as
+  float32, like OpenFace, and no longer converts the whole image for every landmark.
+  `NURLMSOptimizer(use_cpp_warp=...)` is accepted and ignored.
+- The eye-model debug file uses the system temporary folder.
 - Repository: model files and Git LFS were removed from the history.

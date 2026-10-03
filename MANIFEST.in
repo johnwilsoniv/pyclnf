@@ -4,9 +4,6 @@ include LICENSE
 include pyproject.toml
 include pyclnf/models/openface_models.json
 
-# Include cpp_warp C extension
-include pyclnf/cpp_warp/*.so
-
 # OpenFace's model files are never packaged: users download them from OpenFace
 # (see README). Exclude them even if a local checkout still has copies.
 global-exclude *.npz *.npy *.dat *.onnx *.mlmodel *.pt *.pth

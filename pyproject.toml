@@ -59,12 +59,11 @@ Repository = "https://github.com/johnwilsoniv/pyclnf"
 "Bug Tracker" = "https://github.com/johnwilsoniv/pyclnf/issues"
 
 [tool.setuptools]
-packages = ["pyclnf", "pyclnf.core", "pyclnf.utils", "pyclnf.models", "pyclnf.cpp_warp"]
+packages = ["pyclnf", "pyclnf.core", "pyclnf.utils", "pyclnf.models"]
 
 [tool.setuptools.package-data]
 pyclnf = [
     "models/openface_models.json",
-    "cpp_warp/*.so",
 ]
 
 # OpenFace's model files are never packaged: users download them from OpenFace.

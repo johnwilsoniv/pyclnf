@@ -2,6 +2,7 @@
 Utility functions for CLNF - similarity transforms and coordinate transformations.
 """
 
+import cv2
 import numpy as np
 from typing import Tuple
 
@@ -154,3 +155,43 @@ def invert_similarity_transform(transform: np.ndarray) -> np.ndarray:
     ], dtype=np.float64)  # Use float64 for precision (matches C++ double)
 
     return inv_transform
+
+
+def extract_aoi(image: np.ndarray, center_x: float, center_y: float,
+                sim_ref_to_img: np.ndarray, aoi_size: int) -> np.ndarray:
+    """
+    Extract the area of interest around a landmark, warped to reference coordinates.
+
+    Matches OpenFace's Patch_experts::Response: a float 2x3 matrix centred on the
+    landmark and cv::warpAffine with WARP_INVERSE_MAP | INTER_LINEAR (border 0).
+    The CPU path (NURLMSOptimizer) and the batched path (BatchedCEN) both use this
+    function, so they extract identical patches from the same image.
+
+    Args:
+        image: Grayscale image. OpenFace warps a float32 image; a uint8 image gives
+               a uint8 patch (interpolated values rounded to integers).
+        center_x, center_y: Landmark position in image coordinates
+        sim_ref_to_img: 2x3 similarity transform from reference to image
+        aoi_size: Width and height of the square patch
+
+    Returns:
+        (aoi_size, aoi_size) patch with the dtype of image
+    """
+    a1 = sim_ref_to_img[0, 0]
+    b1 = -sim_ref_to_img[0, 1]  # Note the NEGATIVE sign (matches C++)
+
+    center_offset = (aoi_size - 1.0) / 2.0
+    tx = center_x - a1 * center_offset + b1 * center_offset
+    ty = center_y - a1 * center_offset - b1 * center_offset
+
+    sim_matrix = np.array([
+        [a1, -b1, tx],
+        [b1,  a1, ty]
+    ], dtype=np.float32)
+
+    return cv2.warpAffine(
+        image,
+        sim_matrix,
+        (aoi_size, aoi_size),
+        flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR
+    )

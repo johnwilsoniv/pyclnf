@@ -16,6 +16,8 @@ import numpy as np
 from typing import Dict, List, Optional, Tuple
 import cv2
 
+from .utils import extract_aoi
+
 try:
     import torch
     import torch.nn.functional as F
@@ -194,8 +196,9 @@ class BatchedCEN:
         """
         Warped AOI extraction matching C++ OpenFace.
 
-        Uses cv2.warpAffine with WARP_INVERSE_MAP to extract patches
-        centered at each landmark in the warped reference frame.
+        Uses utils.extract_aoi (cv2.warpAffine with WARP_INVERSE_MAP), the same
+        extraction as the CPU path, to extract patches centered at each landmark
+        in the warped reference frame.
 
         Args:
             image: Grayscale image (H, W) as float32
@@ -210,32 +213,9 @@ class BatchedCEN:
         aois = np.zeros((68, aoi_size, aoi_size), dtype=np.float32)
         valid_mask = np.ones(68, dtype=bool)
 
-        # Extract similarity transform components
-        a1 = sim_ref_to_img[0, 0]
-        b1 = -sim_ref_to_img[0, 1]  # Note: NEGATIVE sign matches C++
-
-        center_offset = (aoi_size - 1.0) / 2.0
-
         for lm_idx in range(68):
             center_x, center_y = landmarks[lm_idx]
-
-            # Build warp matrix centered at this landmark
-            # This matches _extract_aoi in optimizer.py
-            tx = center_x - a1 * center_offset + b1 * center_offset
-            ty = center_y - a1 * center_offset - b1 * center_offset
-
-            sim_matrix = np.array([
-                [a1, -b1, tx],
-                [b1,  a1, ty]
-            ], dtype=np.float32)
-
-            # Extract warped patch
-            aois[lm_idx] = cv2.warpAffine(
-                image,
-                sim_matrix,
-                (aoi_size, aoi_size),
-                flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR
-            )
+            aois[lm_idx] = extract_aoi(image, center_x, center_y, sim_ref_to_img, aoi_size)
 
         return aois, valid_mask
 

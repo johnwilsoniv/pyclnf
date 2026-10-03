@@ -33,18 +33,9 @@ import cv2
 from numba import jit
 import os
 
-from .utils import align_shapes_with_scale, apply_similarity_transform, invert_similarity_transform
+from .utils import (align_shapes_with_scale, apply_similarity_transform,
+                    invert_similarity_transform, extract_aoi)
 from .cen_patch_expert import MirroredCENPatchExpert, CENPatchExpert
-
-# Try to import cpp_warp for exact OpenCV 4.12 matching with C++ OpenFace
-# This is optional - falls back to cv2.warpAffine if not available
-try:
-    from pyclnf.cpp_warp import extract_aoi
-    import pyclnf.cpp_warp as cpp_warp
-    CPP_WARP_AVAILABLE = True
-except ImportError:
-    cpp_warp = None
-    CPP_WARP_AVAILABLE = False
 
 # Try to import GPU acceleration modules
 try:
@@ -273,7 +264,7 @@ class NURLMSOptimizer:
                  convergence_profile: str = None,
                  use_peak_confidence: bool = False,
                  use_direct_kde: bool = True,  # True enables fast vectorized mean-shift (2x faster)
-                 use_cpp_warp: bool = True,  # Use C++ warpAffine for exact OpenCV 4.12 matching
+                 use_cpp_warp: bool = True,  # Ignored (the cpp_warp extension was removed)
                  use_gpu: bool = True,  # Enable GPU acceleration for response maps and mean-shift
                  gpu_device: str = 'mps'):  # GPU device: 'mps' (Apple), 'cuda', or 'cpu'
         """
@@ -305,9 +296,9 @@ class NURLMSOptimizer:
                            Default True to fix zero-sum bug in precomputed grid approach.
                            The precomputed grid snaps positions to 0.1px causing systematic
                            errors that cancel to zero when summed across landmarks.
-            use_cpp_warp: Use C++ warpAffine wrapper (links against Homebrew OpenCV 4.12).
-                         This ensures exact numerical matching with C++ OpenFace's warpAffine.
-                         Default True if cpp_warp module is available.
+            use_cpp_warp: Ignored. Patches are always extracted with cv2.warpAffine
+                         (utils.extract_aoi), the same function the batched path uses.
+                         Kept so existing calls keep working.
             use_gpu: Enable GPU acceleration for response maps and mean-shift computation.
                     Uses BatchedCEN for response maps and GPUMeanShift for mean-shift.
                     Provides exact numerical match with CPU while being 2-5x faster.
@@ -322,12 +313,6 @@ class NURLMSOptimizer:
         self.tracked_landmarks = tracked_landmarks if tracked_landmarks is not None else [36, 48, 30, 8]
         self.use_peak_confidence = use_peak_confidence
         self.use_direct_kde = use_direct_kde
-
-        # Use C++ warpAffine if requested and available
-        self.use_cpp_warp = use_cpp_warp and CPP_WARP_AVAILABLE
-        if use_cpp_warp and not CPP_WARP_AVAILABLE:
-            import warnings
-            warnings.warn("cpp_warp module not available, falling back to cv2.warpAffine")
 
         # GPU acceleration setup
         self.use_gpu = use_gpu and BATCHED_CEN_AVAILABLE and GPU_MEAN_SHIFT_AVAILABLE
@@ -428,48 +413,20 @@ class NURLMSOptimizer:
         """
         Extract Area of Interest patch around a landmark.
 
-        Uses cpp_warp.extract_aoi if available for exact C++ OpenFace matching,
-        otherwise falls back to cv2.warpAffine.
+        Uses utils.extract_aoi (cv2.warpAffine), the same extraction as the
+        batched path (BatchedCEN).
 
         Args:
             image: Source grayscale image (float32)
             center_x: Landmark X coordinate in image space
-            center_y: Landmark Y coordinate in image spaceO
+            center_y: Landmark Y coordinate in image space
             sim_ref_to_img: 2x3 similarity transform from reference to image
             aoi_size: Size of the AOI patch (square)
 
         Returns:
-            Extracted AOI patch (aoi_size x aoi_size, float32)
+            Extracted AOI patch (aoi_size x aoi_size, dtype of image)
         """
-        if self.use_cpp_warp:
-            # Use C++ wrapper for exact OpenCV 4.12 matching
-            return cpp_warp.extract_aoi(
-                image.astype(np.float32, copy=False),
-                float(center_x),
-                float(center_y),
-                sim_ref_to_img.astype(np.float64, copy=False),
-                int(aoi_size)
-            )
-        else:
-            # Fall back to Python cv2.warpAffine
-            a1 = sim_ref_to_img[0, 0]
-            b1 = -sim_ref_to_img[0, 1]  # Note the NEGATIVE sign!
-
-            center_offset = (aoi_size - 1.0) / 2.0
-            tx = center_x - a1 * center_offset + b1 * center_offset
-            ty = center_y - a1 * center_offset - b1 * center_offset
-
-            sim_matrix = np.array([
-                [a1, -b1, tx],
-                [b1,  a1, ty]
-            ], dtype=np.float32)
-
-            return cv2.warpAffine(
-                image,
-                sim_matrix,
-                (aoi_size, aoi_size),
-                flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR
-            )
+        return extract_aoi(image, center_x, center_y, sim_ref_to_img, aoi_size)
 
     def _compute_scale_adapted_params(self, patch_scaling: float) -> Tuple[float, float, float]:
         """
@@ -1117,7 +1074,6 @@ class NURLMSOptimizer:
 
         if sim_img_to_ref is not None and sim_ref_to_img is not None:
             # WARPING MODE: Use similarity transform to extract warped region
-            # Use _extract_aoi which supports cpp_warp for exact C++ OpenFace matching
             area_of_interest = self._extract_aoi(
                 image, center_x, center_y, sim_ref_to_img, area_of_interest_width
             )
@@ -1241,6 +1197,11 @@ class NURLMSOptimizer:
                 landmarks_2d, patch_experts, image, window_size,
                 sim_ref_to_img=sim_ref_to_img
             )
+
+        # Like OpenFace (CLNF::DetectLandmarks converts the image to CV_32F before
+        # fitting), extract patches from a float32 image. Converting once here also
+        # avoids converting the whole image for every landmark.
+        image = image.astype(np.float32, copy=False)
 
         response_maps = {}
         use_warping = (sim_img_to_ref is not None and sim_ref_to_img is not None)
@@ -2055,7 +2016,6 @@ class NURLMSOptimizer:
             area_of_interest_height = window_size + patch_dim - 1
 
             # Extract Area of Interest using similarity transform
-            # Use _extract_aoi which supports cpp_warp for exact C++ OpenFace matching
             area_of_interest = self._extract_aoi(
                 image, center_x, center_y, sim_ref_to_img, area_of_interest_width
             )
@@ -2074,7 +2034,6 @@ class NURLMSOptimizer:
                 print(f"[PY][DEBUG]   area_of_interest_width: {area_of_interest_width}")
                 print(f"[PY][DEBUG]   patch_dim: {patch_dim}")
                 print(f"[PY][DEBUG]   window_size: {window_size}")
-                print(f"[PY][DEBUG]   use_cpp_warp: {self.use_cpp_warp}")
 
             # Check if this is CEN (has response_sparse() method) or CCNF (has compute_response())
             if hasattr(patch_expert, 'response_sparse') and not hasattr(patch_expert, 'compute_response'):

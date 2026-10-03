@@ -23,7 +23,7 @@ INTERNAL = {p.stem for p in PKG.iterdir()
 
 
 def test_sources_use_package_imports_and_leave_sys_path_alone():
-    assert {"models", "core", "utils", "cpp_warp"} <= INTERNAL
+    assert {"models", "core", "utils"} <= INTERNAL
     problems = []
     for f in sorted(PKG.rglob("*.py")):
         tree = ast.parse(f.read_text(encoding="utf-8"), filename=str(f))
