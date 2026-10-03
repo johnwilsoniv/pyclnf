@@ -37,6 +37,13 @@ from .utils import (align_shapes_with_scale, apply_similarity_transform,
                     invert_similarity_transform, extract_aoi, auto_gpu_device)
 from .cen_patch_expert import MirroredCENPatchExpert, CENPatchExpert
 
+
+def _debug_path(name: str) -> str:
+    """Where a debug dump goes (written only with debug_mode=True): the system temporary folder."""
+    import tempfile
+    return os.path.join(tempfile.gettempdir(), name)
+
+
 # Try to import GPU acceleration modules (they need torch, which is optional)
 try:
     from .batched_cen import BatchedCEN, TORCH_AVAILABLE
@@ -1952,7 +1959,7 @@ class NURLMSOptimizer:
                 print(f"[PY][MEANSHIFT]   Response at peak (5,4): {response_map[5, 4]:.8f}")
                 # Save response map for detailed comparison
                 import numpy as np
-                np.save('/tmp/py_response_lm36.npy', response_map)
+                np.save(_debug_path('py_response_lm36.npy'), response_map)
 
             # Use Numba-optimized mean-shift computation with precomputed grid
             ms_x, ms_y = _kde_mean_shift_numba(response_map, dx, dy, a, kde_weights)
@@ -2024,8 +2031,8 @@ class NURLMSOptimizer:
 
             # DEBUG: Save area_of_interest for landmark 36
             if landmark_idx == 36 and iteration == 0 and self.debug_mode and not is_mirror_patch:
-                np.save('/tmp/area_of_interest_lm36.npy', area_of_interest)
-                cv2.imwrite('/tmp/area_of_interest_lm36.png', area_of_interest)
+                np.save(_debug_path('area_of_interest_lm36.npy'), area_of_interest)
+                cv2.imwrite(_debug_path('area_of_interest_lm36.png'), area_of_interest)
                 print(f"[PY][DEBUG] Saved area_of_interest for landmark 36:")
                 print(f"[PY][DEBUG]   Shape: {area_of_interest.shape}")
                 print(f"[PY][DEBUG]   Stats: min={area_of_interest.min()}, max={area_of_interest.max()}, mean={area_of_interest.mean():.1f}")
@@ -2050,7 +2057,7 @@ class NURLMSOptimizer:
                     if hasattr(patch_expert, 'width_support'):
                         print(f"[PY][DEBUG][LM{landmark_idx}]   width_support: {patch_expert.width_support}, height_support: {patch_expert.height_support}")
                     # Save a copy to compare
-                    np.save(f'/tmp/area_of_interest_lm{landmark_idx}_before_response.npy', area_of_interest.copy())
+                    np.save(_debug_path(f'area_of_interest_lm{landmark_idx}_before_response.npy'), area_of_interest.copy())
 
                 # Use response_sparse with None for right side (like C++ with empty mat)
                 response_map, _ = patch_expert.response_sparse(area_of_interest, None)
@@ -2128,7 +2135,7 @@ class NURLMSOptimizer:
 
         # DEBUG: Save response map BEFORE sigma for landmarks 36 and 42
         if landmark_idx in (36, 42) and iteration == 0 and window_size == 11 and self.debug_mode and not is_mirror_patch:
-            np.save(f'/tmp/python_response_map_lm{landmark_idx}_iter0_ws11_BEFORE_SIGMA.npy', response_map)
+            np.save(_debug_path(f'python_response_map_lm{landmark_idx}_iter0_ws11_BEFORE_SIGMA.npy'), response_map)
             print(f"[PY][DEBUG][LM{landmark_idx}] Saved BEFORE SIGMA response map (WS={window_size}): shape={response_map.shape}, min={response_map.min():.6f}, max={response_map.max():.6f}, mean={response_map.mean():.6f}")
 
         # Apply CCNF Sigma transformation for spatial correlation modeling

@@ -233,7 +233,8 @@ class CLNF:
                 self.eye_model = HierarchicalEyeModel(
                     str(self.model_dir),
                     use_gpu=use_gpu,
-                    gpu_device=gpu_device
+                    gpu_device=gpu_device,
+                    debug_mode=debug_mode
                 )
                 gpu_status = " (GPU)" if self.eye_model.use_gpu else ""
                 print(f"[OK] Eye refinement model loaded{gpu_status}")

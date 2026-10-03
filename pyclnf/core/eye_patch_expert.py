@@ -445,7 +445,8 @@ class HierarchicalEyeModel:
     accurate eye landmark detection using NU-RLMS optimization.
     """
 
-    def __init__(self, model_dir: str, use_gpu: bool = True, gpu_device: str = 'auto'):
+    def __init__(self, model_dir: str, use_gpu: bool = True, gpu_device: str = 'auto',
+                 debug_mode: bool = False):
         """
         Load hierarchical eye models for both eyes.
 
@@ -453,9 +454,12 @@ class HierarchicalEyeModel:
             model_dir: Base directory containing exported eye models
             use_gpu: Whether to use GPU for batched computation
             gpu_device: GPU device ('auto', 'mps', 'cuda', 'cpu')
+            debug_mode: Write CCNF debug files to the system temporary folder
+                        (CPU path; off by default, results are the same either way)
         """
         self.model_dir = Path(model_dir)
         self.use_gpu = use_gpu
+        self.debug_mode = debug_mode
 
         # Auto-detect GPU device (torch is optional: without it the eye model runs on the CPU)
         if gpu_device == 'auto':
@@ -928,8 +932,8 @@ class HierarchicalEyeModel:
 
         response_map = np.zeros((resp_h, resp_w), dtype=np.float32)
 
-        # Debug for Eye landmarks 0 and 8 on 3x3 response maps (like C++)
-        debug_enabled = (resp_h == 3 and resp_w == 3 and landmark_idx in [0, 8])
+        # Debug for Eye landmarks 0 and 8 on 3x3 response maps (like C++), only with debug_mode
+        debug_enabled = (self.debug_mode and resp_h == 3 and resp_w == 3 and landmark_idx in [0, 8])
         debug_call = getattr(self, '_ccnf_debug_call', 0)
 
         # Slide patch across area of interest
